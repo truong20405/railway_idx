@@ -1,5 +1,6 @@
 """
-Railway runner - sequential keep-alive for multiple Firebase accounts.
+Railway runner - keep-alive for multiple Firebase accounts.
+Supports sequential or concurrent account sessions with RAM safety limit.
 """
 
 import asyncio
@@ -24,6 +25,35 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("ENV %s=%r khong hop le, dung mac dinh %s", name, raw, default)
+        return default
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "1" if default else "0").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def detect_total_ram_mb():
+    # Railway containers expose memory info via /proc/meminfo.
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) // 1024
+    except Exception:
+        return None
+    return None
+
+
 # ==================== CONFIG ====================
 ACCOUNTS = [
     {
@@ -44,11 +74,17 @@ ACCOUNTS = [
     },
 ]
 
-RUN_DURATION = int(os.getenv("RUN_DURATION", "900"))  # seconds/account
-RELOAD_INTERVAL = int(os.getenv("RELOAD_INTERVAL", "300"))  # seconds
-SCREENSHOT_INTERVAL = int(os.getenv("SCREENSHOT_INTERVAL", "10"))  # seconds
-NAVIGATION_TIMEOUT = int(os.getenv("NAVIGATION_TIMEOUT", "30"))  # seconds
-MAX_NAV_RETRIES = int(os.getenv("MAX_NAV_RETRIES", "3"))
+RUN_DURATION = env_int("RUN_DURATION", 900)  # seconds/account
+RELOAD_INTERVAL = env_int("RELOAD_INTERVAL", 300)  # seconds
+SCREENSHOT_INTERVAL = env_int("SCREENSHOT_INTERVAL", 10)  # seconds
+NAVIGATION_TIMEOUT = env_int("NAVIGATION_TIMEOUT", 30)  # seconds
+MAX_NAV_RETRIES = env_int("MAX_NAV_RETRIES", 3)
+MAX_CONCURRENT_ACCOUNTS = max(1, env_int("MAX_CONCURRENT_ACCOUNTS", 2))
+ENABLE_SCREENSHOT = env_bool("ENABLE_SCREENSHOT", False)
+MEMORY_SAVER = env_bool("MEMORY_SAVER", True)
+AUTO_LIMIT_BY_RAM = env_bool("AUTO_LIMIT_BY_RAM", False)
+ESTIMATED_RAM_PER_ACCOUNT_MB = max(128, env_int("ESTIMATED_RAM_PER_ACCOUNT_MB", 650))
+RAM_RESERVE_MB = max(128, env_int("RAM_RESERVE_MB", 256))
 
 SCREENSHOT_DIR = Path("screenshots")
 PROFILES_DIR = Path("profiles")
@@ -74,6 +110,30 @@ def handle_shutdown(sig, frame):
 
 signal.signal(signal.SIGINT, handle_shutdown)
 signal.signal(signal.SIGTERM, handle_shutdown)
+
+
+def compute_effective_concurrency(requested: int) -> int:
+    requested = max(1, requested)
+    if not AUTO_LIMIT_BY_RAM:
+        return requested
+
+    total_ram_mb = detect_total_ram_mb()
+    if not total_ram_mb:
+        return requested
+
+    browser_budget_mb = max(0, total_ram_mb - RAM_RESERVE_MB)
+    ram_based_limit = max(1, browser_budget_mb // ESTIMATED_RAM_PER_ACCOUNT_MB)
+    effective = max(1, min(requested, ram_based_limit))
+    if effective < requested:
+        log.warning(
+            "RAM ~%sMB, giam song song tu %s -> %s (uoc tinh %sMB/account, reserve=%sMB)",
+            total_ram_mb,
+            requested,
+            effective,
+            ESTIMATED_RAM_PER_ACCOUNT_MB,
+            RAM_RESERVE_MB,
+        )
+    return effective
 
 
 def is_google_login_url(url: str) -> bool:
@@ -261,9 +321,23 @@ async def run_account(account: dict):
             "--no-sandbox",
             "--disable-gpu",
             "--disable-dev-shm-usage",
-            "--window-size=1280,720",
+            "--window-size=1024,640",
             "--disable-blink-features=AutomationControlled",
         ]
+        if MEMORY_SAVER:
+            browser_args.extend(
+                [
+                    "--disable-extensions",
+                    "--disable-sync",
+                    "--disable-background-networking",
+                    "--disable-default-apps",
+                    "--mute-audio",
+                    "--blink-settings=imagesEnabled=false",
+                    "--renderer-process-limit=2",
+                    "--disk-cache-size=1",
+                    "--media-cache-size=1",
+                ]
+            )
         if account.get("proxy"):
             browser_args.insert(0, f"--proxy-server={account['proxy']}")
 
@@ -293,12 +367,12 @@ async def run_account(account: dict):
         log.info("[%s] Da vao Firebase, chay %ss", account_name, RUN_DURATION)
         start_time = time.time()
         next_reload = start_time + RELOAD_INTERVAL
-        next_shot = start_time
+        next_shot = start_time if ENABLE_SCREENSHOT else float("inf")
         reload_count = 0
 
         while global_running and (time.time() - start_time < RUN_DURATION):
             now = time.time()
-            if now >= next_shot:
+            if ENABLE_SCREENSHOT and now >= next_shot:
                 shot_path = SCREENSHOT_DIR / f"{account_name}.png"
                 try:
                     await tab.save_screenshot(str(shot_path))
@@ -335,16 +409,38 @@ async def run_account(account: dict):
 
 
 async def main():
+    effective_concurrency = min(len(ACCOUNTS), compute_effective_concurrency(MAX_CONCURRENT_ACCOUNTS))
+    mode = "song song" if effective_concurrency > 1 else "tuan tu"
+    log.info(
+        "Cau hinh: mode=%s, max_concurrent=%s, run_duration=%ss, screenshot=%s, memory_saver=%s",
+        mode,
+        effective_concurrency,
+        RUN_DURATION,
+        ENABLE_SCREENSHOT,
+        MEMORY_SAVER,
+    )
+
     cycle = 0
     while global_running:
         cycle += 1
         log.info("===== Chu ky #%s | %s =====", cycle, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        for account in ACCOUNTS:
-            if not global_running:
-                break
-            await run_account(account)
-            if global_running:
-                await asyncio.sleep(3)
+        if effective_concurrency == 1:
+            for account in ACCOUNTS:
+                if not global_running:
+                    break
+                await run_account(account)
+                if global_running:
+                    await asyncio.sleep(3)
+        else:
+            for i in range(0, len(ACCOUNTS), effective_concurrency):
+                if not global_running:
+                    break
+                batch = ACCOUNTS[i : i + effective_concurrency]
+                log.info("Chay dong thoi: %s", ", ".join(ac["name"] for ac in batch))
+                tasks = [asyncio.create_task(run_account(account)) for account in batch]
+                await asyncio.gather(*tasks)
+                if global_running and i + effective_concurrency < len(ACCOUNTS):
+                    await asyncio.sleep(3)
 
     log.info("Da dung toan bo chuong trinh.")
 
