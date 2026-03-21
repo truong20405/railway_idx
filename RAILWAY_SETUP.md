@@ -35,6 +35,14 @@ MEMORY_SAVER=1
 AUTO_LIMIT_BY_RAM=0
 ESTIMATED_RAM_PER_ACCOUNT_MB=650
 RAM_RESERVE_MB=256
+
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+TELEGRAM_THREAD_ID=
+TELEGRAM_SEND_EVENTS=1
+TELEGRAM_SEND_SCREENSHOT=1
+TELEGRAM_PHOTO_INTERVAL=300
+TELEGRAM_TIMEOUT=20
 ```
 
 ## 4) Runtime behavior
@@ -46,6 +54,8 @@ RAM_RESERVE_MB=256
 - Moi account chay `RUN_DURATION` giay.
 - Reload tab moi `RELOAD_INTERVAL` giay.
 - Screenshot cap nhat trong `screenshots/<account>.png` (tat bang `ENABLE_SCREENSHOT=0`).
+- Co the gui thong bao + anh ve Telegram neu set `TELEGRAM_BOT_TOKEN` va `TELEGRAM_CHAT_ID`.
+- `TELEGRAM_SEND_SCREENSHOT=1` de gui anh dinh ky, chu ky theo `TELEGRAM_PHOTO_INTERVAL` (giay).
 - Profile trinh duyet luu tai `profiles/<account>/`.
 
 ## 5) Logs

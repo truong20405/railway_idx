@@ -1,1 +1,2 @@
 nodriver>=0.28
+requests>=2.31
