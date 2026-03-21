@@ -95,6 +95,7 @@ TELEGRAM_SEND_LOGIN_SCREENSHOT = env_bool("TELEGRAM_SEND_LOGIN_SCREENSHOT", True
 TELEGRAM_SEND_SCREENSHOT = env_bool("TELEGRAM_SEND_SCREENSHOT", False)
 TELEGRAM_PHOTO_INTERVAL = max(10, env_int("TELEGRAM_PHOTO_INTERVAL", 300))
 TELEGRAM_TIMEOUT = max(5, env_int("TELEGRAM_TIMEOUT", 20))
+MIN_SCREENSHOT_BYTES = max(1000, env_int("MIN_SCREENSHOT_BYTES", 12000))
 
 SCREENSHOT_DIR = Path("screenshots")
 PROFILES_DIR = Path("profiles")
@@ -215,6 +216,51 @@ def extract_first_email(text: str):
         return None
     match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
     return match.group(0) if match else None
+
+
+async def wait_for_firebase_ready(tab, account_name: str, timeout: int = 25) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        current_url = getattr(tab.target, "url", "")
+        if is_google_login_url(current_url):
+            return False
+        if "studio.firebase.google.com" in (current_url or "").lower():
+            try:
+                content = await tab.get_content()
+                if content and len(content) > 1500:
+                    return True
+            except Exception:
+                pass
+        await asyncio.sleep(1)
+    log.warning("[%s] Firebase load cham/khong on dinh truoc khi chup anh", account_name)
+    return True
+
+
+async def save_screenshot_with_retry(tab, shot_path: Path, account_name: str, retries: int = 5) -> bool:
+    for attempt in range(1, retries + 1):
+        try:
+            await tab.save_screenshot(str(shot_path))
+            size = shot_path.stat().st_size if shot_path.exists() else 0
+            if size >= MIN_SCREENSHOT_BYTES:
+                return True
+            log.warning(
+                "[%s] Anh nho bat thuong (%s bytes), thu lai %s/%s",
+                account_name,
+                size,
+                attempt,
+                retries,
+            )
+        except Exception as e:
+            log.warning("[%s] Loi chup anh lan %s/%s: %s", account_name, attempt, retries, e)
+
+        if attempt < retries:
+            await asyncio.sleep(2)
+            if attempt == 3:
+                try:
+                    await asyncio.wait_for(tab.reload(), timeout=20)
+                except Exception:
+                    pass
+    return False
 
 
 async def wait_for_element(tab, selector: str, timeout: int = 15):
@@ -498,16 +544,30 @@ async def run_account(account: dict):
                 log.error("[%s] Dang nhap xong nhung khong vao lai duoc Firebase", account_name)
                 return
 
+        # Always open Firebase again after auth/verify to avoid capturing a stale/blank tab.
+        tab = await safe_navigate(browser, account["firebase_url"], account_name)
+        if not tab:
+            log.error("[%s] Khong mo duoc Firebase URL sau buoc xac minh", account_name)
+            return
+        current_url = getattr(tab.target, "url", "")
+        if is_google_login_url(current_url):
+            log.error("[%s] Bi day ve trang login khi vao Firebase", account_name)
+            return
+        await wait_for_firebase_ready(tab, account_name)
+
         log.info("[%s] Da vao Firebase, chay %ss", account_name, RUN_DURATION)
         if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
             await send_telegram_message(f"[{account_name}] Da vao Firebase, bat dau keep-alive {RUN_DURATION}s")
         if TELEGRAM_SEND_LOGIN_SCREENSHOT and is_telegram_enabled():
             login_shot_path = SCREENSHOT_DIR / f"{account_name}_login.png"
             try:
-                await tab.save_screenshot(str(login_shot_path))
-                caption = f"{account_name} login OK | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                await send_telegram_photo(login_shot_path, caption=caption)
-                log.info("[%s] Da gui 1 anh login ve Telegram", account_name)
+                ok = await save_screenshot_with_retry(tab, login_shot_path, account_name)
+                if ok:
+                    caption = f"{account_name} login OK | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    await send_telegram_photo(login_shot_path, caption=caption)
+                    log.info("[%s] Da gui 1 anh login ve Telegram", account_name)
+                else:
+                    log.warning("[%s] Bo qua gui anh login vi chup anh khong dat chat luong", account_name)
             except Exception as e:
                 log.warning("[%s] Loi gui anh login Telegram: %s", account_name, e)
 
@@ -523,7 +583,7 @@ async def run_account(account: dict):
             if need_capture and now >= next_shot:
                 shot_path = SCREENSHOT_DIR / f"{account_name}.png"
                 try:
-                    await tab.save_screenshot(str(shot_path))
+                    await save_screenshot_with_retry(tab, shot_path, account_name, retries=3)
                 except Exception:
                     pass
                 next_shot = now + SCREENSHOT_INTERVAL

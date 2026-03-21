@@ -44,6 +44,7 @@ TELEGRAM_SEND_LOGIN_SCREENSHOT=1
 TELEGRAM_SEND_SCREENSHOT=0
 TELEGRAM_PHOTO_INTERVAL=300
 TELEGRAM_TIMEOUT=20
+MIN_SCREENSHOT_BYTES=12000
 ```
 
 ## 4) Runtime behavior
@@ -58,6 +59,7 @@ TELEGRAM_TIMEOUT=20
 - Co the gui thong bao + anh ve Telegram neu set `TELEGRAM_BOT_TOKEN` va `TELEGRAM_CHAT_ID`.
 - `TELEGRAM_SEND_LOGIN_SCREENSHOT=1` de gui 1 anh duy nhat luc account vao Firebase thanh cong.
 - `TELEGRAM_SEND_SCREENSHOT=1` de gui anh dinh ky, chu ky theo `TELEGRAM_PHOTO_INTERVAL` (giay).
+- `MIN_SCREENSHOT_BYTES` dung de loc anh qua nho (de bi trang); script se tu chup lai.
 - Profile trinh duyet luu tai `profiles/<account>/`.
 
 ## 5) Logs
