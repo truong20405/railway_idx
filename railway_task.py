@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 import nodriver as uc
+import requests
 
 # ==================== LOGGING ====================
 logging.basicConfig(
@@ -86,6 +87,13 @@ MEMORY_SAVER = env_bool("MEMORY_SAVER", True)
 AUTO_LIMIT_BY_RAM = env_bool("AUTO_LIMIT_BY_RAM", False)
 ESTIMATED_RAM_PER_ACCOUNT_MB = max(128, env_int("ESTIMATED_RAM_PER_ACCOUNT_MB", 650))
 RAM_RESERVE_MB = max(128, env_int("RAM_RESERVE_MB", 256))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8431444806:AAFuLZnElTNtLoVBTTiVtnzKonkM00wE2h4").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5788963050").strip()
+TELEGRAM_THREAD_ID = os.getenv("TELEGRAM_THREAD_ID", "").strip()
+TELEGRAM_SEND_EVENTS = env_bool("TELEGRAM_SEND_EVENTS", True)
+TELEGRAM_SEND_SCREENSHOT = env_bool("TELEGRAM_SEND_SCREENSHOT", False)
+TELEGRAM_PHOTO_INTERVAL = max(10, env_int("TELEGRAM_PHOTO_INTERVAL", 300))
+TELEGRAM_TIMEOUT = max(5, env_int("TELEGRAM_TIMEOUT", 20))
 
 SCREENSHOT_DIR = Path("screenshots")
 PROFILES_DIR = Path("profiles")
@@ -101,6 +109,62 @@ GMAIL_ATOM_URL = "https://mail.google.com/mail/u/0/feed/atom"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 global_running = True
+
+
+def is_telegram_enabled() -> bool:
+    return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+
+
+def _telegram_payload(text: str):
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    if TELEGRAM_THREAD_ID:
+        payload["message_thread_id"] = TELEGRAM_THREAD_ID
+    return payload
+
+
+def send_telegram_message_sync(text: str):
+    if not is_telegram_enabled():
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        resp = requests.post(url, data=_telegram_payload(text), timeout=TELEGRAM_TIMEOUT)
+        if resp.ok:
+            return True
+        log.warning("Telegram sendMessage that bai: HTTP %s %s", resp.status_code, resp.text[:300])
+        return False
+    except Exception as e:
+        log.warning("Telegram sendMessage loi: %s", e)
+        return False
+
+
+def send_telegram_photo_sync(photo_path: Path, caption: str = ""):
+    if not is_telegram_enabled():
+        return False
+    if not photo_path.exists():
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
+        if TELEGRAM_THREAD_ID:
+            payload["message_thread_id"] = TELEGRAM_THREAD_ID
+        with photo_path.open("rb") as f:
+            files = {"photo": (photo_path.name, f, "image/png")}
+            resp = requests.post(url, data=payload, files=files, timeout=TELEGRAM_TIMEOUT)
+        if resp.ok:
+            return True
+        log.warning("Telegram sendPhoto that bai: HTTP %s %s", resp.status_code, resp.text[:300])
+        return False
+    except Exception as e:
+        log.warning("Telegram sendPhoto loi: %s", e)
+        return False
+
+
+async def send_telegram_message(text: str):
+    await asyncio.to_thread(send_telegram_message_sync, text)
+
+
+async def send_telegram_photo(photo_path: Path, caption: str = ""):
+    await asyncio.to_thread(send_telegram_photo_sync, photo_path, caption)
 
 
 def handle_shutdown(sig, frame):
@@ -290,6 +354,8 @@ async def login_gmail(browser, account: dict) -> bool:
         current_url = getattr(tab.target, "url", "")
         if "mail.google.com" in current_url or "myaccount.google.com" in current_url:
             log.info("[%s] Dang nhap thanh cong", account_name)
+            if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
+                await send_telegram_message(f"[{account_name}] Dang nhap Gmail thanh cong")
             return True
 
         page_lower = ""
@@ -432,20 +498,29 @@ async def run_account(account: dict):
                 return
 
         log.info("[%s] Da vao Firebase, chay %ss", account_name, RUN_DURATION)
+        if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
+            await send_telegram_message(f"[{account_name}] Da vao Firebase, bat dau keep-alive {RUN_DURATION}s")
+
         start_time = time.time()
         next_reload = start_time + RELOAD_INTERVAL
-        next_shot = start_time if ENABLE_SCREENSHOT else float("inf")
+        need_capture = ENABLE_SCREENSHOT or (is_telegram_enabled() and TELEGRAM_SEND_SCREENSHOT)
+        next_shot = start_time if need_capture else float("inf")
+        next_telegram_photo = start_time if (is_telegram_enabled() and TELEGRAM_SEND_SCREENSHOT) else float("inf")
         reload_count = 0
 
         while global_running and (time.time() - start_time < RUN_DURATION):
             now = time.time()
-            if ENABLE_SCREENSHOT and now >= next_shot:
+            if need_capture and now >= next_shot:
                 shot_path = SCREENSHOT_DIR / f"{account_name}.png"
                 try:
                     await tab.save_screenshot(str(shot_path))
                 except Exception:
                     pass
                 next_shot = now + SCREENSHOT_INTERVAL
+                if is_telegram_enabled() and TELEGRAM_SEND_SCREENSHOT and now >= next_telegram_photo:
+                    caption = f"{account_name} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    await send_telegram_photo(shot_path, caption=caption)
+                    next_telegram_photo = now + TELEGRAM_PHOTO_INTERVAL
 
             if now >= next_reload:
                 try:
@@ -463,6 +538,8 @@ async def run_account(account: dict):
 
         elapsed = int(time.time() - start_time)
         log.info("[%s] Ket thuc session sau %ss", account_name, elapsed)
+        if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
+            await send_telegram_message(f"[{account_name}] Ket thuc session sau {elapsed}s")
 
     except Exception as e:
         log.exception("[%s] Crash: %s", account_name, e)
@@ -479,13 +556,20 @@ async def main():
     effective_concurrency = min(len(ACCOUNTS), compute_effective_concurrency(MAX_CONCURRENT_ACCOUNTS))
     mode = "song song" if effective_concurrency > 1 else "tuan tu"
     log.info(
-        "Cau hinh: mode=%s, max_concurrent=%s, run_duration=%ss, screenshot=%s, memory_saver=%s",
+        "Cau hinh: mode=%s, max_concurrent=%s, run_duration=%ss, screenshot=%s, memory_saver=%s, telegram=%s",
         mode,
         effective_concurrency,
         RUN_DURATION,
         ENABLE_SCREENSHOT,
         MEMORY_SAVER,
+        is_telegram_enabled(),
     )
+    if TELEGRAM_SEND_SCREENSHOT and not is_telegram_enabled():
+        log.warning("TELEGRAM_SEND_SCREENSHOT=1 nhung thieu TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID")
+    if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
+        await send_telegram_message(
+            f"Runner bat dau | mode={mode} | max_concurrent={effective_concurrency} | run_duration={RUN_DURATION}s"
+        )
 
     cycle = 0
     while global_running:
