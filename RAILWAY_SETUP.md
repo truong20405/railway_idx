@@ -25,7 +25,8 @@ RECOVERY_EMAIL_2=
 PROXY_2=
 
 RUN_DURATION=900
-RELOAD_INTERVAL=300
+RELOAD_INTERVAL=600
+LOGIN_STAGGER_SECONDS=60
 SCREENSHOT_INTERVAL=10
 NAVIGATION_TIMEOUT=30
 MAX_NAV_RETRIES=3
@@ -48,11 +49,13 @@ MIN_SCREENSHOT_BYTES=12000
 ```
 
 ## 4) Runtime behavior
-- Chay tuan tu, 2 pha:
-  - Pha login ban dau: login `account_1` xong moi login `account_2`.
-  - Pha keep-alive: chay `account_1` theo `RUN_DURATION`, xong moi den `account_2`.
-- Moi account chay `RUN_DURATION` giay.
-- Reload tab moi `RELOAD_INTERVAL` giay.
+- Login tuan tu theo thu tu account:
+  - Login `account_1`.
+  - Cho `LOGIN_STAGGER_SECONDS` (mac dinh 60s).
+  - Login `account_2`.
+- Sau khi login, giu ca 2 browser mo dong thoi (khong dong browser giua chu ky).
+- Reload moi tab moi `RELOAD_INTERVAL` giay (mac dinh 600s = 10 phut).
+- `RUN_DURATION` hien khong dung trong mode keep-alive lien tuc.
 - Screenshot cap nhat trong `screenshots/<account>.png` (tat bang `ENABLE_SCREENSHOT=0`).
 - Co the gui thong bao + anh ve Telegram neu set `TELEGRAM_BOT_TOKEN` va `TELEGRAM_CHAT_ID`.
 - `TELEGRAM_SEND_LOGIN_SCREENSHOT=1` de gui 1 anh duy nhat luc account vao Firebase thanh cong.

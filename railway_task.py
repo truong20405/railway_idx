@@ -76,8 +76,9 @@ ACCOUNTS = [
     },
 ]
 
-RUN_DURATION = env_int("RUN_DURATION", 900)  # seconds/account
-RELOAD_INTERVAL = env_int("RELOAD_INTERVAL", 300)  # seconds
+RUN_DURATION = env_int("RUN_DURATION", 900)  # kept for backward compatibility logs
+RELOAD_INTERVAL = env_int("RELOAD_INTERVAL", 600)  # seconds (10 minutes)
+LOGIN_STAGGER_SECONDS = max(0, env_int("LOGIN_STAGGER_SECONDS", 60))
 SCREENSHOT_INTERVAL = env_int("SCREENSHOT_INTERVAL", 10)  # seconds
 NAVIGATION_TIMEOUT = env_int("NAVIGATION_TIMEOUT", 30)  # seconds
 MAX_NAV_RETRIES = env_int("MAX_NAV_RETRIES", 3)
@@ -469,10 +470,55 @@ async def verify_google_identity(browser, account: dict):
     return True, None
 
 
-async def run_account(account: dict, run_keepalive: bool = True):
+async def ensure_firebase_tab(browser, account: dict):
     account_name = account["name"]
-    phase = "keep-alive" if run_keepalive else "login-only"
-    log.info("[%s] Bat dau phase: %s", account_name, phase)
+
+    tab = await safe_navigate(browser, account["firebase_url"], account_name)
+    if not tab:
+        log.error("[%s] Khong mo duoc Firebase URL", account_name)
+        return None
+
+    current_url = getattr(tab.target, "url", "")
+    need_login = is_google_login_url(current_url)
+    if need_login:
+        log.info("[%s] Can dang nhap Gmail", account_name)
+    else:
+        verified, _ = await verify_google_identity(browser, account)
+        if verified:
+            log.info("[%s] Da co session dang nhap hop le, bo qua buoc login", account_name)
+        else:
+            log.info("[%s] Chua dung account, se dang nhap lai", account_name)
+            need_login = True
+
+    if need_login:
+        ok = await login_gmail(browser, account)
+        if not ok:
+            return None
+        verified, detected_email = await verify_google_identity(browser, account)
+        if not verified:
+            log.error(
+                "[%s] Dang nhap xong nhung chua xac nhan dung account (detected=%s)",
+                account_name,
+                detected_email,
+            )
+            return None
+
+    tab = await safe_navigate(browser, account["firebase_url"], account_name)
+    if not tab:
+        log.error("[%s] Khong mo duoc Firebase URL sau buoc xac minh", account_name)
+        return None
+    current_url = getattr(tab.target, "url", "")
+    if is_google_login_url(current_url):
+        log.error("[%s] Bi day ve trang login khi vao Firebase", account_name)
+        return None
+
+    await wait_for_firebase_ready(tab, account_name)
+    return tab
+
+
+async def init_account_session(account: dict):
+    account_name = account["name"]
+    log.info("[%s] Bat dau phase: login-only", account_name)
 
     browser = None
     try:
@@ -512,54 +558,19 @@ async def run_account(account: dict, run_keepalive: bool = True):
         )
         browser = await uc.start(config=config)
 
-        tab = await safe_navigate(browser, account["firebase_url"], account_name)
+        tab = await ensure_firebase_tab(browser, account)
         if not tab:
-            log.error("[%s] Khong mo duoc Firebase URL", account_name)
-            return
+            if browser:
+                try:
+                    browser.stop()
+                except Exception:
+                    pass
+            return None
 
-        current_url = getattr(tab.target, "url", "")
-        need_login = is_google_login_url(current_url)
-        if need_login:
-            log.info("[%s] Can dang nhap Gmail", account_name)
-        else:
-            verified, _ = await verify_google_identity(browser, account)
-            if verified:
-                log.info("[%s] Da co session dang nhap hop le, bo qua buoc login", account_name)
-            else:
-                log.info("[%s] Chua dung account, se dang nhap lai", account_name)
-                need_login = True
-
-        if need_login:
-            ok = await login_gmail(browser, account)
-            if not ok:
-                return
-            verified, detected_email = await verify_google_identity(browser, account)
-            if not verified:
-                log.error(
-                    "[%s] Dang nhap xong nhung chua xac nhan dung account (detected=%s)",
-                    account_name,
-                    detected_email,
-                )
-                return
-            tab = await safe_navigate(browser, account["firebase_url"], account_name)
-            if not tab:
-                log.error("[%s] Dang nhap xong nhung khong vao lai duoc Firebase", account_name)
-                return
-
-        # Always open Firebase again after auth/verify to avoid capturing a stale/blank tab.
-        tab = await safe_navigate(browser, account["firebase_url"], account_name)
-        if not tab:
-            log.error("[%s] Khong mo duoc Firebase URL sau buoc xac minh", account_name)
-            return
-        current_url = getattr(tab.target, "url", "")
-        if is_google_login_url(current_url):
-            log.error("[%s] Bi day ve trang login khi vao Firebase", account_name)
-            return
-        await wait_for_firebase_ready(tab, account_name)
-
-        log.info("[%s] Da vao Firebase, chay %ss", account_name, RUN_DURATION)
+        log.info("[%s] Login OK, giu browser mo de keep-alive", account_name)
         if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
-            await send_telegram_message(f"[{account_name}] Da vao Firebase, bat dau keep-alive {RUN_DURATION}s")
+            await send_telegram_message(f"[{account_name}] Da vao Firebase, bat dau keep-alive")
+
         if TELEGRAM_SEND_LOGIN_SCREENSHOT and is_telegram_enabled():
             login_shot_path = SCREENSHOT_DIR / f"{account_name}_login.png"
             try:
@@ -573,69 +584,76 @@ async def run_account(account: dict, run_keepalive: bool = True):
             except Exception as e:
                 log.warning("[%s] Loi gui anh login Telegram: %s", account_name, e)
 
-        if not run_keepalive:
-            log.info("[%s] Hoan tat login, chuyen account tiep theo", account_name)
-            return
-
-        start_time = time.time()
-        next_reload = start_time + RELOAD_INTERVAL
-        need_capture = ENABLE_SCREENSHOT or (is_telegram_enabled() and TELEGRAM_SEND_SCREENSHOT)
-        next_shot = start_time if need_capture else float("inf")
-        next_telegram_photo = start_time if (is_telegram_enabled() and TELEGRAM_SEND_SCREENSHOT) else float("inf")
-        reload_count = 0
-
-        while global_running and (time.time() - start_time < RUN_DURATION):
-            now = time.time()
-            if need_capture and now >= next_shot:
-                shot_path = SCREENSHOT_DIR / f"{account_name}.png"
-                try:
-                    await save_screenshot_with_retry(tab, shot_path, account_name, retries=3)
-                except Exception:
-                    pass
-                next_shot = now + SCREENSHOT_INTERVAL
-                if is_telegram_enabled() and TELEGRAM_SEND_SCREENSHOT and now >= next_telegram_photo:
-                    caption = f"{account_name} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    await send_telegram_photo(shot_path, caption=caption)
-                    next_telegram_photo = now + TELEGRAM_PHOTO_INTERVAL
-
-            if now >= next_reload:
-                try:
-                    await asyncio.wait_for(tab.reload(), timeout=20)
-                    reload_count += 1
-                    log.info("[%s] Reload #%s OK", account_name, reload_count)
-                except Exception as e:
-                    log.warning("[%s] Reload loi: %s", account_name, e)
-                    new_tab = await safe_navigate(browser, account["firebase_url"], account_name)
-                    if new_tab:
-                        tab = new_tab
-                next_reload = now + RELOAD_INTERVAL
-
-            await asyncio.sleep(1)
-
-        elapsed = int(time.time() - start_time)
-        log.info("[%s] Ket thuc session sau %ss", account_name, elapsed)
-        if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
-            await send_telegram_message(f"[{account_name}] Ket thuc session sau {elapsed}s")
-
+        now = time.time()
+        session = {
+            "account": account,
+            "account_name": account_name,
+            "browser": browser,
+            "tab": tab,
+            "need_capture": ENABLE_SCREENSHOT or (is_telegram_enabled() and TELEGRAM_SEND_SCREENSHOT),
+            "next_reload": now + RELOAD_INTERVAL,
+            "next_shot": now + SCREENSHOT_INTERVAL,
+            "next_telegram_photo": now + TELEGRAM_PHOTO_INTERVAL,
+            "reload_count": 0,
+        }
+        return session
     except Exception as e:
-        log.exception("[%s] Crash: %s", account_name, e)
-    finally:
+        log.exception("[%s] Crash khoi tao session: %s", account_name, e)
         if browser:
             try:
                 browser.stop()
             except Exception:
                 pass
-        log.info("[%s] Browser da dong", account_name)
+        return None
+
+
+async def keepalive_tick(session: dict):
+    account = session["account"]
+    account_name = session["account_name"]
+    browser = session["browser"]
+    tab = session["tab"]
+    now = time.time()
+
+    if session["need_capture"] and now >= session["next_shot"]:
+        shot_path = SCREENSHOT_DIR / f"{account_name}.png"
+        try:
+            await save_screenshot_with_retry(tab, shot_path, account_name, retries=3)
+        except Exception:
+            pass
+        session["next_shot"] = now + SCREENSHOT_INTERVAL
+
+        if is_telegram_enabled() and TELEGRAM_SEND_SCREENSHOT and now >= session["next_telegram_photo"]:
+            caption = f"{account_name} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            await send_telegram_photo(shot_path, caption=caption)
+            session["next_telegram_photo"] = now + TELEGRAM_PHOTO_INTERVAL
+
+    if now < session["next_reload"]:
+        return
+
+    try:
+        await asyncio.wait_for(tab.reload(), timeout=25)
+        session["reload_count"] += 1
+        log.info("[%s] Reload #%s OK", account_name, session["reload_count"])
+    except Exception as e:
+        log.warning("[%s] Reload loi: %s", account_name, e)
+        recovered_tab = await ensure_firebase_tab(browser, account)
+        if recovered_tab:
+            tab = recovered_tab
+            session["tab"] = recovered_tab
+            log.info("[%s] Khoi phuc tab Firebase thanh cong sau loi reload", account_name)
+        else:
+            log.error("[%s] Khong khoi phuc duoc tab sau loi reload", account_name)
+
+    session["next_reload"] = now + RELOAD_INTERVAL
 
 
 async def main():
-    effective_concurrency = 1
-    mode = "tuan tu"
+    mode = "login-tuan-tu + keepalive-song-hanh"
     log.info(
-        "Cau hinh: mode=%s, max_concurrent=%s, run_duration=%ss, screenshot=%s, memory_saver=%s, telegram=%s",
+        "Cau hinh: mode=%s, reload_interval=%ss, login_stagger=%ss, screenshot=%s, memory_saver=%s, telegram=%s",
         mode,
-        effective_concurrency,
-        RUN_DURATION,
+        RELOAD_INTERVAL,
+        LOGIN_STAGGER_SECONDS,
         ENABLE_SCREENSHOT,
         MEMORY_SAVER,
         is_telegram_enabled(),
@@ -646,28 +664,46 @@ async def main():
         )
     if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
         await send_telegram_message(
-            f"Runner bat dau | mode={mode} | max_concurrent={effective_concurrency} | run_duration={RUN_DURATION}s"
+            f"Runner bat dau | mode={mode} | reload={RELOAD_INTERVAL}s | stagger={LOGIN_STAGGER_SECONDS}s"
         )
 
-    # Phase 1: force sequential login for all accounts first.
-    log.info("===== Pha login ban dau (tuan tu) =====")
-    for account in ACCOUNTS:
-        if not global_running:
-            break
-        await run_account(account, run_keepalive=False)
-        if global_running:
-            await asyncio.sleep(3)
-
-    cycle = 0
-    while global_running:
-        cycle += 1
-        log.info("===== Chu ky keep-alive #%s | %s =====", cycle, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        for account in ACCOUNTS:
+    sessions = []
+    try:
+        for idx, account in enumerate(ACCOUNTS):
             if not global_running:
                 break
-            await run_account(account, run_keepalive=True)
-            if global_running:
-                await asyncio.sleep(3)
+            session = await init_account_session(account)
+            if session:
+                sessions.append(session)
+            else:
+                log.error("[%s] Khoi tao session that bai", account["name"])
+
+            if idx < len(ACCOUNTS) - 1 and global_running:
+                log.info("Cho %ss truoc khi mo %s", LOGIN_STAGGER_SECONDS, ACCOUNTS[idx + 1]["name"])
+                await asyncio.sleep(LOGIN_STAGGER_SECONDS)
+
+        if not sessions:
+            log.error("Khong co session nao khoi tao thanh cong. Dung chuong trinh.")
+            return
+
+        log.info("Da khoi tao %s/%s session, bat dau vong keep-alive", len(sessions), len(ACCOUNTS))
+        while global_running:
+            for session in sessions:
+                if not global_running:
+                    break
+                await keepalive_tick(session)
+            await asyncio.sleep(1)
+    finally:
+        for session in sessions:
+            browser = session.get("browser")
+            account_name = session.get("account_name", "unknown")
+            if not browser:
+                continue
+            try:
+                browser.stop()
+                log.info("[%s] Browser da dong", account_name)
+            except Exception:
+                pass
 
     log.info("Da dung toan bo chuong trinh.")
 
