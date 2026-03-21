@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 import signal
 import time
 from datetime import datetime
@@ -96,6 +97,7 @@ GMAIL_LOGIN_URL = (
     "?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F"
     "&service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
 )
+GMAIL_ATOM_URL = "https://mail.google.com/mail/u/0/feed/atom"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 global_running = True
@@ -141,6 +143,13 @@ def is_google_login_url(url: str) -> bool:
         return False
     lower_url = url.lower()
     return "accounts.google.com" in lower_url or "signin" in lower_url
+
+
+def extract_first_email(text: str):
+    if not text:
+        return None
+    match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+    return match.group(0) if match else None
 
 
 async def wait_for_element(tab, selector: str, timeout: int = 15):
@@ -306,6 +315,46 @@ async def login_gmail(browser, account: dict) -> bool:
     return False
 
 
+async def verify_google_identity(browser, account: dict):
+    account_name = account["name"]
+    expected_email = (account.get("email") or "").strip().lower()
+
+    tab = await safe_navigate(browser, GMAIL_ATOM_URL, account_name, timeout=20)
+    if not tab:
+        log.warning("[%s] Khong mo duoc trang xac minh Gmail", account_name)
+        return False, None
+
+    await asyncio.sleep(2)
+    current_url = getattr(tab.target, "url", "")
+    if is_google_login_url(current_url):
+        log.info("[%s] Chua dang nhap Google (redirect login)", account_name)
+        return False, None
+
+    content = ""
+    try:
+        content = await tab.get_content()
+    except Exception:
+        pass
+
+    detected_email = extract_first_email(content)
+    if detected_email:
+        detected_lower = detected_email.strip().lower()
+        if expected_email and detected_lower != expected_email:
+            log.warning(
+                "[%s] Dang dang nhap bang email khac: %s (mong doi: %s)",
+                account_name,
+                detected_email,
+                account.get("email"),
+            )
+            return False, detected_email
+        log.info("[%s] Xac nhan da dang nhap dung account: %s", account_name, detected_email)
+        return True, detected_email
+
+    # Fallback: khong lay duoc email nhung khong bi redirect login.
+    log.info("[%s] Co session Google, khong doc duoc email de doi chieu", account_name)
+    return True, None
+
+
 async def run_account(account: dict):
     account_name = account["name"]
     log.info("[%s] Bat dau session", account_name)
@@ -354,10 +403,28 @@ async def run_account(account: dict):
             return
 
         current_url = getattr(tab.target, "url", "")
-        if is_google_login_url(current_url):
+        need_login = is_google_login_url(current_url)
+        if need_login:
             log.info("[%s] Can dang nhap Gmail", account_name)
+        else:
+            verified, _ = await verify_google_identity(browser, account)
+            if verified:
+                log.info("[%s] Da co session dang nhap hop le, bo qua buoc login", account_name)
+            else:
+                log.info("[%s] Chua dung account, se dang nhap lai", account_name)
+                need_login = True
+
+        if need_login:
             ok = await login_gmail(browser, account)
             if not ok:
+                return
+            verified, detected_email = await verify_google_identity(browser, account)
+            if not verified:
+                log.error(
+                    "[%s] Dang nhap xong nhung chua xac nhan dung account (detected=%s)",
+                    account_name,
+                    detected_email,
+                )
                 return
             tab = await safe_navigate(browser, account["firebase_url"], account_name)
             if not tab:
