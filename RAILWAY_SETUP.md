@@ -29,7 +29,7 @@ RELOAD_INTERVAL=300
 SCREENSHOT_INTERVAL=10
 NAVIGATION_TIMEOUT=30
 MAX_NAV_RETRIES=3
-MAX_CONCURRENT_ACCOUNTS=2
+MAX_CONCURRENT_ACCOUNTS=1
 ENABLE_SCREENSHOT=0
 MEMORY_SAVER=1
 AUTO_LIMIT_BY_RAM=0
@@ -48,11 +48,9 @@ MIN_SCREENSHOT_BYTES=12000
 ```
 
 ## 4) Runtime behavior
-- Co 2 mode:
-  - `MAX_CONCURRENT_ACCOUNTS=1`: chay tuan tu account_1 roi account_2.
-  - `MAX_CONCURRENT_ACCOUNTS=2`: chay dong thoi 2 account (log xen ke).
-- Mac dinh dang ep chay 2 acc cung luc (`MAX_CONCURRENT_ACCOUNTS=2`, `AUTO_LIMIT_BY_RAM=0`).
-- Neu doi sang `AUTO_LIMIT_BY_RAM=1`, script tu dong ha muc song song neu RAM khong du.
+- Chay tuan tu, 2 pha:
+  - Pha login ban dau: login `account_1` xong moi login `account_2`.
+  - Pha keep-alive: chay `account_1` theo `RUN_DURATION`, xong moi den `account_2`.
 - Moi account chay `RUN_DURATION` giay.
 - Reload tab moi `RELOAD_INTERVAL` giay.
 - Screenshot cap nhat trong `screenshots/<account>.png` (tat bang `ENABLE_SCREENSHOT=0`).

@@ -81,7 +81,8 @@ RELOAD_INTERVAL = env_int("RELOAD_INTERVAL", 300)  # seconds
 SCREENSHOT_INTERVAL = env_int("SCREENSHOT_INTERVAL", 10)  # seconds
 NAVIGATION_TIMEOUT = env_int("NAVIGATION_TIMEOUT", 30)  # seconds
 MAX_NAV_RETRIES = env_int("MAX_NAV_RETRIES", 3)
-MAX_CONCURRENT_ACCOUNTS = max(1, env_int("MAX_CONCURRENT_ACCOUNTS", 2))
+# Force sequential flow: account_1 completes before account_2 starts.
+MAX_CONCURRENT_ACCOUNTS = 1
 ENABLE_SCREENSHOT = env_bool("ENABLE_SCREENSHOT", False)
 MEMORY_SAVER = env_bool("MEMORY_SAVER", True)
 AUTO_LIMIT_BY_RAM = env_bool("AUTO_LIMIT_BY_RAM", False)
@@ -468,9 +469,10 @@ async def verify_google_identity(browser, account: dict):
     return True, None
 
 
-async def run_account(account: dict):
+async def run_account(account: dict, run_keepalive: bool = True):
     account_name = account["name"]
-    log.info("[%s] Bat dau session", account_name)
+    phase = "keep-alive" if run_keepalive else "login-only"
+    log.info("[%s] Bat dau phase: %s", account_name, phase)
 
     browser = None
     try:
@@ -571,6 +573,10 @@ async def run_account(account: dict):
             except Exception as e:
                 log.warning("[%s] Loi gui anh login Telegram: %s", account_name, e)
 
+        if not run_keepalive:
+            log.info("[%s] Hoan tat login, chuyen account tiep theo", account_name)
+            return
+
         start_time = time.time()
         next_reload = start_time + RELOAD_INTERVAL
         need_capture = ENABLE_SCREENSHOT or (is_telegram_enabled() and TELEGRAM_SEND_SCREENSHOT)
@@ -623,8 +629,8 @@ async def run_account(account: dict):
 
 
 async def main():
-    effective_concurrency = min(len(ACCOUNTS), compute_effective_concurrency(MAX_CONCURRENT_ACCOUNTS))
-    mode = "song song" if effective_concurrency > 1 else "tuan tu"
+    effective_concurrency = 1
+    mode = "tuan tu"
     log.info(
         "Cau hinh: mode=%s, max_concurrent=%s, run_duration=%ss, screenshot=%s, memory_saver=%s, telegram=%s",
         mode,
@@ -643,27 +649,25 @@ async def main():
             f"Runner bat dau | mode={mode} | max_concurrent={effective_concurrency} | run_duration={RUN_DURATION}s"
         )
 
+    # Phase 1: force sequential login for all accounts first.
+    log.info("===== Pha login ban dau (tuan tu) =====")
+    for account in ACCOUNTS:
+        if not global_running:
+            break
+        await run_account(account, run_keepalive=False)
+        if global_running:
+            await asyncio.sleep(3)
+
     cycle = 0
     while global_running:
         cycle += 1
-        log.info("===== Chu ky #%s | %s =====", cycle, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        if effective_concurrency == 1:
-            for account in ACCOUNTS:
-                if not global_running:
-                    break
-                await run_account(account)
-                if global_running:
-                    await asyncio.sleep(3)
-        else:
-            for i in range(0, len(ACCOUNTS), effective_concurrency):
-                if not global_running:
-                    break
-                batch = ACCOUNTS[i : i + effective_concurrency]
-                log.info("Chay dong thoi: %s", ", ".join(ac["name"] for ac in batch))
-                tasks = [asyncio.create_task(run_account(account)) for account in batch]
-                await asyncio.gather(*tasks)
-                if global_running and i + effective_concurrency < len(ACCOUNTS):
-                    await asyncio.sleep(3)
+        log.info("===== Chu ky keep-alive #%s | %s =====", cycle, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        for account in ACCOUNTS:
+            if not global_running:
+                break
+            await run_account(account, run_keepalive=True)
+            if global_running:
+                await asyncio.sleep(3)
 
     log.info("Da dung toan bo chuong trinh.")
 
