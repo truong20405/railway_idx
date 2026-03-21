@@ -40,7 +40,8 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 TELEGRAM_THREAD_ID=
 TELEGRAM_SEND_EVENTS=1
-TELEGRAM_SEND_SCREENSHOT=1
+TELEGRAM_SEND_LOGIN_SCREENSHOT=1
+TELEGRAM_SEND_SCREENSHOT=0
 TELEGRAM_PHOTO_INTERVAL=300
 TELEGRAM_TIMEOUT=20
 ```
@@ -55,6 +56,7 @@ TELEGRAM_TIMEOUT=20
 - Reload tab moi `RELOAD_INTERVAL` giay.
 - Screenshot cap nhat trong `screenshots/<account>.png` (tat bang `ENABLE_SCREENSHOT=0`).
 - Co the gui thong bao + anh ve Telegram neu set `TELEGRAM_BOT_TOKEN` va `TELEGRAM_CHAT_ID`.
+- `TELEGRAM_SEND_LOGIN_SCREENSHOT=1` de gui 1 anh duy nhat luc account vao Firebase thanh cong.
 - `TELEGRAM_SEND_SCREENSHOT=1` de gui anh dinh ky, chu ky theo `TELEGRAM_PHOTO_INTERVAL` (giay).
 - Profile trinh duyet luu tai `profiles/<account>/`.
 

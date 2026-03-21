@@ -91,6 +91,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8431444806:AAFuLZnElTNtLoV
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5788963050").strip()
 TELEGRAM_THREAD_ID = os.getenv("TELEGRAM_THREAD_ID", "").strip()
 TELEGRAM_SEND_EVENTS = env_bool("TELEGRAM_SEND_EVENTS", True)
+TELEGRAM_SEND_LOGIN_SCREENSHOT = env_bool("TELEGRAM_SEND_LOGIN_SCREENSHOT", True)
 TELEGRAM_SEND_SCREENSHOT = env_bool("TELEGRAM_SEND_SCREENSHOT", False)
 TELEGRAM_PHOTO_INTERVAL = max(10, env_int("TELEGRAM_PHOTO_INTERVAL", 300))
 TELEGRAM_TIMEOUT = max(5, env_int("TELEGRAM_TIMEOUT", 20))
@@ -500,6 +501,15 @@ async def run_account(account: dict):
         log.info("[%s] Da vao Firebase, chay %ss", account_name, RUN_DURATION)
         if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
             await send_telegram_message(f"[{account_name}] Da vao Firebase, bat dau keep-alive {RUN_DURATION}s")
+        if TELEGRAM_SEND_LOGIN_SCREENSHOT and is_telegram_enabled():
+            login_shot_path = SCREENSHOT_DIR / f"{account_name}_login.png"
+            try:
+                await tab.save_screenshot(str(login_shot_path))
+                caption = f"{account_name} login OK | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                await send_telegram_photo(login_shot_path, caption=caption)
+                log.info("[%s] Da gui 1 anh login ve Telegram", account_name)
+            except Exception as e:
+                log.warning("[%s] Loi gui anh login Telegram: %s", account_name, e)
 
         start_time = time.time()
         next_reload = start_time + RELOAD_INTERVAL
@@ -564,8 +574,10 @@ async def main():
         MEMORY_SAVER,
         is_telegram_enabled(),
     )
-    if TELEGRAM_SEND_SCREENSHOT and not is_telegram_enabled():
-        log.warning("TELEGRAM_SEND_SCREENSHOT=1 nhung thieu TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID")
+    if (TELEGRAM_SEND_SCREENSHOT or TELEGRAM_SEND_LOGIN_SCREENSHOT) and not is_telegram_enabled():
+        log.warning(
+            "TELEGRAM_SEND_SCREENSHOT/TELEGRAM_SEND_LOGIN_SCREENSHOT bat nhung thieu TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID"
+        )
     if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
         await send_telegram_message(
             f"Runner bat dau | mode={mode} | max_concurrent={effective_concurrency} | run_duration={RUN_DURATION}s"
