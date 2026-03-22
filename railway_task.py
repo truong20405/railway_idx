@@ -269,15 +269,30 @@ def extract_gmail_feed_account_email(content: str):
     if not content:
         return None
 
-    author_email = re.search(
-        r"<author>\s*<name>.*?</name>\s*<email>\s*([^<\s]+)\s*</email>\s*</author>",
-        content,
+    # Chi doc metadata o phan dau feed (truoc cac <entry>) de tranh lay email nguoi gui mail.
+    header = re.split(r"<entry\b", content, maxsplit=1, flags=re.IGNORECASE)[0]
+
+    # Thu lay email account tu tieu de Gmail feed.
+    title_match = re.search(
+        r"<title>\s*gmail\s*-\s*inbox\s*for\s*([^<\s]+)\s*</title>",
+        header,
         re.IGNORECASE | re.DOTALL,
+    )
+    if title_match:
+        title_email = extract_first_email(title_match.group(1))
+        if title_email:
+            return title_email.strip()
+
+    # Thu lay email feed-level author.
+    author_email = re.search(
+        r"<feed[\s\S]*?<author>\s*<name>.*?</name>\s*<email>\s*([^<\s]+)\s*</email>\s*</author>",
+        header,
+        re.IGNORECASE,
     )
     if author_email:
         return author_email.group(1).strip()
 
-    return extract_first_email(content)
+    return None
 
 
 def has_google_auth_challenge(content: str) -> bool:
@@ -575,6 +590,10 @@ async def verify_google_identity(browser, account: dict):
         log.warning("[%s] Khong xac minh duoc session Gmail feed (co the chua dang nhap)", account_name)
         return False, None
 
+    if expected_email and expected_email in content.lower():
+        log.info("[%s] Xac nhan session Gmail theo expected_email: %s", account_name, expected_email)
+        return True, expected_email
+
     detected_email = extract_gmail_feed_account_email(content)
     if detected_email:
         detected_lower = detected_email.strip().lower()
@@ -589,8 +608,9 @@ async def verify_google_identity(browser, account: dict):
         log.info("[%s] Xac nhan da dang nhap dung account: %s", account_name, detected_email)
         return True, detected_email
 
-    log.warning("[%s] Khong doc duoc email tu Gmail feed, coi nhu chua xac minh", account_name)
-    return False, None
+    # Feed hop le nhung khong doc duoc email owner. Van coi la co session Google.
+    log.info("[%s] Co session Gmail feed, khong doi chieu duoc email owner", account_name)
+    return True, None
 
 
 async def ensure_firebase_tab(browser, account: dict):
