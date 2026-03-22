@@ -129,6 +129,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5788963050").strip()
 TELEGRAM_THREAD_ID = os.getenv("TELEGRAM_THREAD_ID", "").strip()
 TELEGRAM_SEND_EVENTS = env_bool("TELEGRAM_SEND_EVENTS", True)
 TELEGRAM_SEND_LOGIN_SCREENSHOT = env_bool("TELEGRAM_SEND_LOGIN_SCREENSHOT", True)
+TELEGRAM_SEND_IDX_ENTRY_SCREENSHOT = env_bool(
+    "TELEGRAM_SEND_IDX_ENTRY_SCREENSHOT",
+    TELEGRAM_SEND_LOGIN_SCREENSHOT,
+)
 TELEGRAM_SEND_SCREENSHOT = env_bool("TELEGRAM_SEND_SCREENSHOT", False)
 TELEGRAM_PHOTO_INTERVAL = max(10, env_int("TELEGRAM_PHOTO_INTERVAL", 300))
 TELEGRAM_TIMEOUT = max(5, env_int("TELEGRAM_TIMEOUT", 20))
@@ -304,6 +308,30 @@ async def save_screenshot_with_retry(tab, shot_path: Path, account_name: str, re
                 except Exception:
                     pass
     return False
+
+
+async def capture_idx_entry_screenshot(tab, account_name: str, reason: str):
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    shot_path = SCREENSHOT_DIR / f"{account_name}_idx_entry_{stamp}.png"
+    latest_path = SCREENSHOT_DIR / f"{account_name}_idx_entry_latest.png"
+
+    try:
+        ok = await save_screenshot_with_retry(tab, shot_path, account_name, retries=3)
+        if not ok:
+            log.warning("[%s] Khong chup duoc anh luc vao IDX (%s)", account_name, reason)
+            return
+
+        try:
+            shutil.copyfile(shot_path, latest_path)
+        except Exception as e:
+            log.warning("[%s] Khong cap nhat duoc anh latest IDX: %s", account_name, e)
+
+        log.info("[%s] Da chup anh vao IDX (%s): %s", account_name, reason, shot_path.name)
+        if TELEGRAM_SEND_IDX_ENTRY_SCREENSHOT and is_telegram_enabled():
+            caption = f"{account_name} vao IDX ({reason}) | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            await send_telegram_photo(shot_path, caption=caption)
+    except Exception as e:
+        log.warning("[%s] Loi chup anh vao IDX (%s): %s", account_name, reason, e)
 
 
 async def wait_for_element(tab, selector: str, timeout: int = 15):
@@ -666,6 +694,7 @@ async def restart_session_browser(session: dict, reason: str) -> bool:
             new_tab = await ensure_firebase_tab(new_browser, account)
             if not new_tab:
                 raise RuntimeError("Khong khoi phuc duoc tab Firebase")
+            await capture_idx_entry_screenshot(new_tab, account_name, "restart profile")
 
             session["browser"] = new_browser
             session["tab"] = new_tab
@@ -703,23 +732,11 @@ async def init_account_session(account: dict):
         if not tab:
             stop_browser_safely(browser, account_name)
             return None
+        await capture_idx_entry_screenshot(tab, account_name, "khoi tao session")
 
         log.info("[%s] Login OK, giu browser mo de keep-alive", account_name)
         if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
             await send_telegram_message(f"[{account_name}] Da vao Firebase, bat dau keep-alive")
-
-        if TELEGRAM_SEND_LOGIN_SCREENSHOT and is_telegram_enabled():
-            login_shot_path = SCREENSHOT_DIR / f"{account_name}_login.png"
-            try:
-                ok = await save_screenshot_with_retry(tab, login_shot_path, account_name)
-                if ok:
-                    caption = f"{account_name} login OK | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    await send_telegram_photo(login_shot_path, caption=caption)
-                    log.info("[%s] Da gui 1 anh login ve Telegram", account_name)
-                else:
-                    log.warning("[%s] Bo qua gui anh login vi chup anh khong dat chat luong", account_name)
-            except Exception as e:
-                log.warning("[%s] Loi gui anh login Telegram: %s", account_name, e)
 
         now = time.time()
         session = {
@@ -763,6 +780,7 @@ async def keepalive_tick(session: dict):
             if recovered_tab:
                 session["tab"] = recovered_tab
                 session["consecutive_failures"] = 0
+                await capture_idx_entry_screenshot(recovered_tab, account_name, "recover tab healthcheck")
                 log.info("[%s] Healthcheck fail nhung da khoi phuc lai tab", account_name)
             else:
                 await restart_session_browser(session, "healthcheck fail, khong phuc hoi tab")
@@ -803,6 +821,7 @@ async def keepalive_tick(session: dict):
                 if recovered_tab:
                     session["tab"] = recovered_tab
                     session["consecutive_failures"] = 0
+                    await capture_idx_entry_screenshot(recovered_tab, account_name, "recover tab sau loi chup anh")
                     log.info("[%s] Da khoi phuc tab sau chuoi loi chup anh", account_name)
                 else:
                     await restart_session_browser(session, "chup anh loi lien tiep")
@@ -832,6 +851,7 @@ async def keepalive_tick(session: dict):
         if recovered_tab:
             session["tab"] = recovered_tab
             session["consecutive_failures"] = 0
+            await capture_idx_entry_screenshot(recovered_tab, account_name, "recover tab sau reload loi")
             log.info("[%s] Khoi phuc tab Firebase thanh cong sau loi reload", account_name)
         else:
             recovered = await restart_session_browser(session, f"reload loi: {e}")
@@ -859,9 +879,16 @@ async def main():
         MAX_KEEPALIVE_FAILURES,
         BROWSER_RESTART_INTERVAL,
     )
-    if (TELEGRAM_SEND_SCREENSHOT or TELEGRAM_SEND_LOGIN_SCREENSHOT) and not is_telegram_enabled():
+    if (
+        TELEGRAM_SEND_SCREENSHOT
+        or TELEGRAM_SEND_LOGIN_SCREENSHOT
+        or TELEGRAM_SEND_IDX_ENTRY_SCREENSHOT
+    ) and not is_telegram_enabled():
         log.warning(
-            "TELEGRAM_SEND_SCREENSHOT/TELEGRAM_SEND_LOGIN_SCREENSHOT bat nhung thieu TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID"
+            (
+                "TELEGRAM_SEND_SCREENSHOT/TELEGRAM_SEND_LOGIN_SCREENSHOT/"
+                "TELEGRAM_SEND_IDX_ENTRY_SCREENSHOT bat nhung thieu TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID"
+            )
         )
     if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
         await send_telegram_message(

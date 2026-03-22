@@ -49,6 +49,7 @@ TELEGRAM_CHAT_ID=
 TELEGRAM_THREAD_ID=
 TELEGRAM_SEND_EVENTS=1
 TELEGRAM_SEND_LOGIN_SCREENSHOT=1
+TELEGRAM_SEND_IDX_ENTRY_SCREENSHOT=1
 TELEGRAM_SEND_SCREENSHOT=0
 TELEGRAM_PHOTO_INTERVAL=300
 TELEGRAM_TIMEOUT=20
@@ -65,8 +66,9 @@ MIN_SCREENSHOT_BYTES=12000
 - Tu dong tat/mo lai browser moi `BROWSER_RESTART_INTERVAL` giay (mac dinh 3600s = 1 gio).
 - `RUN_DURATION` hien khong dung trong mode keep-alive lien tuc.
 - Screenshot cap nhat trong `screenshots/<account>.png` (tat bang `ENABLE_SCREENSHOT=0`).
+- Moi lan vao lai trang IDX/Firebase thanh cong, script chup anh `screenshots/<account>_idx_entry_<timestamp>.png` (va cap nhat file latest).
 - Co the gui thong bao + anh ve Telegram neu set `TELEGRAM_BOT_TOKEN` va `TELEGRAM_CHAT_ID`.
-- `TELEGRAM_SEND_LOGIN_SCREENSHOT=1` de gui 1 anh duy nhat luc account vao Firebase thanh cong.
+- `TELEGRAM_SEND_IDX_ENTRY_SCREENSHOT=1` de gui anh moi lan vao lai IDX/Firebase thanh cong.
 - `TELEGRAM_SEND_SCREENSHOT=1` de gui anh dinh ky, chu ky theo `TELEGRAM_PHOTO_INTERVAL` (giay).
 - `MIN_SCREENSHOT_BYTES` dung de loc anh qua nho (de bi trang); script se tu chup lai.
 - Profile trinh duyet luu tai `profiles/<account>/`.
