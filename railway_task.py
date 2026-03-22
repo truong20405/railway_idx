@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import signal
 import time
 from datetime import datetime
@@ -56,6 +57,39 @@ def detect_total_ram_mb():
     return None
 
 
+def detect_browser_binary():
+    candidates = []
+    env_browser = os.getenv("CHROME_BIN", "").strip()
+    if env_browser:
+        candidates.append(env_browser)
+    candidates.extend(
+        [
+            "chromium",
+            "chromium-browser",
+            "google-chrome",
+            "google-chrome-stable",
+            "chrome",
+            "msedge",
+        ]
+    )
+    for candidate in candidates:
+        if os.path.isabs(candidate) and Path(candidate).exists():
+            return candidate
+        found = shutil.which(candidate)
+        if found:
+            return found
+    return None
+
+
+def is_running_as_root():
+    if os.name != "posix":
+        return False
+    try:
+        return hasattr(os, "geteuid") and os.geteuid() == 0  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
+
 # ==================== CONFIG ====================
 ACCOUNTS = [
     {
@@ -78,6 +112,7 @@ ACCOUNTS = [
 
 RUN_DURATION = env_int("RUN_DURATION", 900)  # kept for backward compatibility logs
 RELOAD_INTERVAL = env_int("RELOAD_INTERVAL", 600)  # seconds (10 minutes)
+BROWSER_RESTART_INTERVAL = max(0, env_int("BROWSER_RESTART_INTERVAL", 3600))  # seconds (1 hour)
 LOGIN_STAGGER_SECONDS = max(0, env_int("LOGIN_STAGGER_SECONDS", 60))
 SCREENSHOT_INTERVAL = env_int("SCREENSHOT_INTERVAL", 10)  # seconds
 NAVIGATION_TIMEOUT = env_int("NAVIGATION_TIMEOUT", 30)  # seconds
@@ -98,6 +133,12 @@ TELEGRAM_SEND_SCREENSHOT = env_bool("TELEGRAM_SEND_SCREENSHOT", False)
 TELEGRAM_PHOTO_INTERVAL = max(10, env_int("TELEGRAM_PHOTO_INTERVAL", 300))
 TELEGRAM_TIMEOUT = max(5, env_int("TELEGRAM_TIMEOUT", 20))
 MIN_SCREENSHOT_BYTES = max(1000, env_int("MIN_SCREENSHOT_BYTES", 12000))
+MAX_KEEPALIVE_FAILURES = max(1, env_int("MAX_KEEPALIVE_FAILURES", 2))
+CRASH_RESTART_ATTEMPTS = max(1, env_int("CRASH_RESTART_ATTEMPTS", 3))
+CRASH_RESTART_BACKOFF_BASE = max(1, env_int("CRASH_RESTART_BACKOFF_BASE", 8))
+CRASH_RESTART_BACKOFF_MAX = max(5, env_int("CRASH_RESTART_BACKOFF_MAX", 60))
+BROWSER_HEALTHCHECK_INTERVAL = max(10, env_int("BROWSER_HEALTHCHECK_INTERVAL", 90))
+BROWSER_HEALTHCHECK_TIMEOUT = max(3, env_int("BROWSER_HEALTHCHECK_TIMEOUT", 10))
 
 SCREENSHOT_DIR = Path("screenshots")
 PROFILES_DIR = Path("profiles")
@@ -516,55 +557,151 @@ async def ensure_firebase_tab(browser, account: dict):
     return tab
 
 
+def build_browser_args(account: dict):
+    browser_args = [
+        f"--user-agent={USER_AGENT}",
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--window-size=1024,640",
+        "--disable-blink-features=AutomationControlled",
+    ]
+    if MEMORY_SAVER:
+        browser_args.extend(
+            [
+                "--disable-extensions",
+                "--disable-sync",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--mute-audio",
+                "--blink-settings=imagesEnabled=false",
+                "--renderer-process-limit=2",
+                "--disk-cache-size=1",
+                "--media-cache-size=1",
+            ]
+        )
+    if account.get("proxy"):
+        browser_args.insert(0, f"--proxy-server={account['proxy']}")
+    return browser_args
+
+
+async def start_browser_for_account(account: dict):
+    account_name = account["name"]
+    profile_dir = PROFILES_DIR / account_name
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    browser_bin = detect_browser_binary()
+    if browser_bin:
+        log.info("[%s] Dung browser binary: %s", account_name, browser_bin)
+    else:
+        log.warning("[%s] Khong tim thay browser binary tu dong (CHROME_BIN/PATH)", account_name)
+
+    running_as_root = is_running_as_root()
+    if running_as_root:
+        log.info("[%s] Dang chay root, tat Chromium sandbox de tranh crash", account_name)
+
+    config = uc.Config(
+        user_data_dir=str(profile_dir),
+        browser_args=build_browser_args(account),
+        lang="en-US",
+        browser_executable_path=browser_bin,
+        sandbox=not running_as_root,
+        no_sandbox=running_as_root,
+    )
+    return await uc.start(config=config)
+
+
+def stop_browser_safely(browser, account_name: str):
+    if not browser:
+        return
+    try:
+        browser.stop()
+    except Exception as e:
+        log.warning("[%s] Loi khi dong browser: %s", account_name, e)
+
+
+def reset_session_timers(session: dict, now: float | None = None):
+    current = now if now is not None else time.time()
+    session["next_reload"] = current + RELOAD_INTERVAL
+    session["next_shot"] = current + SCREENSHOT_INTERVAL
+    session["next_telegram_photo"] = current + TELEGRAM_PHOTO_INTERVAL
+    session["next_healthcheck"] = current + BROWSER_HEALTHCHECK_INTERVAL
+    if BROWSER_RESTART_INTERVAL > 0:
+        session["next_browser_restart"] = current + BROWSER_RESTART_INTERVAL
+    else:
+        session["next_browser_restart"] = float("inf")
+
+
+async def tab_healthcheck(tab, account_name: str) -> bool:
+    try:
+        await asyncio.wait_for(tab.get_content(), timeout=BROWSER_HEALTHCHECK_TIMEOUT)
+        return True
+    except Exception as e:
+        log.warning("[%s] Healthcheck khong phan hoi: %s", account_name, e)
+        return False
+
+
+async def restart_session_browser(session: dict, reason: str) -> bool:
+    account = session["account"]
+    account_name = session["account_name"]
+
+    log.warning("[%s] Dang mo lai profile (%s)...", account_name, reason)
+    old_browser = session.get("browser")
+    stop_browser_safely(old_browser, account_name)
+    session["browser"] = None
+    session["tab"] = None
+
+    for attempt in range(1, CRASH_RESTART_ATTEMPTS + 1):
+        if not global_running:
+            return False
+        if attempt > 1:
+            delay = min(CRASH_RESTART_BACKOFF_BASE * attempt, CRASH_RESTART_BACKOFF_MAX)
+            log.info("[%s] Thu mo lai profile lan %s/%s sau %ss", account_name, attempt, CRASH_RESTART_ATTEMPTS, delay)
+            await asyncio.sleep(delay)
+
+        new_browser = None
+        try:
+            new_browser = await start_browser_for_account(account)
+            new_tab = await ensure_firebase_tab(new_browser, account)
+            if not new_tab:
+                raise RuntimeError("Khong khoi phuc duoc tab Firebase")
+
+            session["browser"] = new_browser
+            session["tab"] = new_tab
+            session["consecutive_failures"] = 0
+            session["crash_recoveries"] = session.get("crash_recoveries", 0) + 1
+            reset_session_timers(session)
+
+            log.info(
+                "[%s] Mo lai profile thanh cong (so lan recover=%s)",
+                account_name,
+                session["crash_recoveries"],
+            )
+            if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
+                await send_telegram_message(f"[{account_name}] Da tu mo lai profile sau su co: {reason}")
+            return True
+        except Exception as e:
+            log.warning("[%s] Mo lai profile that bai lan %s/%s: %s", account_name, attempt, CRASH_RESTART_ATTEMPTS, e)
+            stop_browser_safely(new_browser, account_name)
+
+    log.error("[%s] Khong mo lai duoc profile sau %s lan thu", account_name, CRASH_RESTART_ATTEMPTS)
+    if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
+        await send_telegram_message(f"[{account_name}] Khong the mo lai profile sau su co: {reason}")
+    return False
+
+
 async def init_account_session(account: dict):
     account_name = account["name"]
     log.info("[%s] Bat dau phase: login-only", account_name)
 
     browser = None
     try:
-        profile_dir = PROFILES_DIR / account_name
-        profile_dir.mkdir(parents=True, exist_ok=True)
-
-        browser_args = [
-            f"--user-agent={USER_AGENT}",
-            "--headless=new",
-            "--no-sandbox",
-            "--disable-gpu",
-            "--disable-dev-shm-usage",
-            "--window-size=1024,640",
-            "--disable-blink-features=AutomationControlled",
-        ]
-        if MEMORY_SAVER:
-            browser_args.extend(
-                [
-                    "--disable-extensions",
-                    "--disable-sync",
-                    "--disable-background-networking",
-                    "--disable-default-apps",
-                    "--mute-audio",
-                    "--blink-settings=imagesEnabled=false",
-                    "--renderer-process-limit=2",
-                    "--disk-cache-size=1",
-                    "--media-cache-size=1",
-                ]
-            )
-        if account.get("proxy"):
-            browser_args.insert(0, f"--proxy-server={account['proxy']}")
-
-        config = uc.Config(
-            user_data_dir=str(profile_dir),
-            browser_args=browser_args,
-            lang="en-US",
-        )
-        browser = await uc.start(config=config)
+        browser = await start_browser_for_account(account)
 
         tab = await ensure_firebase_tab(browser, account)
         if not tab:
-            if browser:
-                try:
-                    browser.stop()
-                except Exception:
-                    pass
+            stop_browser_safely(browser, account_name)
             return None
 
         log.info("[%s] Login OK, giu browser mo de keep-alive", account_name)
@@ -594,32 +731,85 @@ async def init_account_session(account: dict):
             "next_reload": now + RELOAD_INTERVAL,
             "next_shot": now + SCREENSHOT_INTERVAL,
             "next_telegram_photo": now + TELEGRAM_PHOTO_INTERVAL,
+            "next_healthcheck": now + BROWSER_HEALTHCHECK_INTERVAL,
+            "next_browser_restart": (now + BROWSER_RESTART_INTERVAL) if BROWSER_RESTART_INTERVAL > 0 else float("inf"),
             "reload_count": 0,
+            "consecutive_failures": 0,
+            "crash_recoveries": 0,
         }
         return session
     except Exception as e:
         log.exception("[%s] Crash khoi tao session: %s", account_name, e)
-        if browser:
-            try:
-                browser.stop()
-            except Exception:
-                pass
+        stop_browser_safely(browser, account_name)
         return None
 
 
 async def keepalive_tick(session: dict):
     account = session["account"]
     account_name = session["account_name"]
-    browser = session["browser"]
-    tab = session["tab"]
+    browser = session.get("browser")
+    tab = session.get("tab")
     now = time.time()
+
+    if not browser or not tab:
+        await restart_session_browser(session, "mat browser/tab trong keep-alive")
+        return
+
+    if now >= session.get("next_healthcheck", 0):
+        alive = await tab_healthcheck(tab, account_name)
+        session["next_healthcheck"] = now + BROWSER_HEALTHCHECK_INTERVAL
+        if not alive:
+            recovered_tab = await ensure_firebase_tab(browser, account)
+            if recovered_tab:
+                session["tab"] = recovered_tab
+                session["consecutive_failures"] = 0
+                log.info("[%s] Healthcheck fail nhung da khoi phuc lai tab", account_name)
+            else:
+                await restart_session_browser(session, "healthcheck fail, khong phuc hoi tab")
+            return
+
+    if now >= session.get("next_browser_restart", float("inf")):
+        log.info(
+            "[%s] Den lich restart browser dinh ky sau %ss, dang khoi dong lai profile",
+            account_name,
+            BROWSER_RESTART_INTERVAL,
+        )
+        recovered = await restart_session_browser(
+            session,
+            f"restart dinh ky sau {BROWSER_RESTART_INTERVAL}s",
+        )
+        if not recovered:
+            log.error("[%s] Restart dinh ky that bai", account_name)
+        return
 
     if session["need_capture"] and now >= session["next_shot"]:
         shot_path = SCREENSHOT_DIR / f"{account_name}.png"
+        shot_ok = False
         try:
-            await save_screenshot_with_retry(tab, shot_path, account_name, retries=3)
+            shot_ok = await save_screenshot_with_retry(tab, shot_path, account_name, retries=3)
         except Exception:
-            pass
+            shot_ok = False
+
+        if not shot_ok:
+            session["consecutive_failures"] = session.get("consecutive_failures", 0) + 1
+            log.warning(
+                "[%s] Chup anh that bai lien tiep (%s/%s)",
+                account_name,
+                session["consecutive_failures"],
+                MAX_KEEPALIVE_FAILURES,
+            )
+            if session["consecutive_failures"] >= MAX_KEEPALIVE_FAILURES:
+                recovered_tab = await ensure_firebase_tab(browser, account)
+                if recovered_tab:
+                    session["tab"] = recovered_tab
+                    session["consecutive_failures"] = 0
+                    log.info("[%s] Da khoi phuc tab sau chuoi loi chup anh", account_name)
+                else:
+                    await restart_session_browser(session, "chup anh loi lien tiep")
+                    return
+        else:
+            session["consecutive_failures"] = 0
+
         session["next_shot"] = now + SCREENSHOT_INTERVAL
 
         if is_telegram_enabled() and TELEGRAM_SEND_SCREENSHOT and now >= session["next_telegram_photo"]:
@@ -633,16 +823,21 @@ async def keepalive_tick(session: dict):
     try:
         await asyncio.wait_for(tab.reload(), timeout=25)
         session["reload_count"] += 1
+        session["consecutive_failures"] = 0
         log.info("[%s] Reload #%s OK", account_name, session["reload_count"])
     except Exception as e:
+        session["consecutive_failures"] = session.get("consecutive_failures", 0) + 1
         log.warning("[%s] Reload loi: %s", account_name, e)
         recovered_tab = await ensure_firebase_tab(browser, account)
         if recovered_tab:
-            tab = recovered_tab
             session["tab"] = recovered_tab
+            session["consecutive_failures"] = 0
             log.info("[%s] Khoi phuc tab Firebase thanh cong sau loi reload", account_name)
         else:
-            log.error("[%s] Khong khoi phuc duoc tab sau loi reload", account_name)
+            recovered = await restart_session_browser(session, f"reload loi: {e}")
+            if not recovered:
+                log.error("[%s] Khong khoi phuc duoc profile sau loi reload", account_name)
+            return
 
     session["next_reload"] = now + RELOAD_INTERVAL
 
@@ -650,13 +845,19 @@ async def keepalive_tick(session: dict):
 async def main():
     mode = "login-tuan-tu + keepalive-song-hanh"
     log.info(
-        "Cau hinh: mode=%s, reload_interval=%ss, login_stagger=%ss, screenshot=%s, memory_saver=%s, telegram=%s",
+        (
+            "Cau hinh: mode=%s, reload_interval=%ss, login_stagger=%ss, screenshot=%s, "
+            "memory_saver=%s, telegram=%s, restart_attempts=%s, max_failures=%s, browser_restart=%ss"
+        ),
         mode,
         RELOAD_INTERVAL,
         LOGIN_STAGGER_SECONDS,
         ENABLE_SCREENSHOT,
         MEMORY_SAVER,
         is_telegram_enabled(),
+        CRASH_RESTART_ATTEMPTS,
+        MAX_KEEPALIVE_FAILURES,
+        BROWSER_RESTART_INTERVAL,
     )
     if (TELEGRAM_SEND_SCREENSHOT or TELEGRAM_SEND_LOGIN_SCREENSHOT) and not is_telegram_enabled():
         log.warning(
@@ -664,7 +865,10 @@ async def main():
         )
     if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
         await send_telegram_message(
-            f"Runner bat dau | mode={mode} | reload={RELOAD_INTERVAL}s | stagger={LOGIN_STAGGER_SECONDS}s"
+            (
+                f"Runner bat dau | mode={mode} | reload={RELOAD_INTERVAL}s | "
+                f"restart_browser={BROWSER_RESTART_INTERVAL}s | stagger={LOGIN_STAGGER_SECONDS}s"
+            )
         )
 
     sessions = []
@@ -699,11 +903,8 @@ async def main():
             account_name = session.get("account_name", "unknown")
             if not browser:
                 continue
-            try:
-                browser.stop()
-                log.info("[%s] Browser da dong", account_name)
-            except Exception:
-                pass
+            stop_browser_safely(browser, account_name)
+            log.info("[%s] Browser da dong", account_name)
 
     log.info("Da dung toan bo chuong trinh.")
 
