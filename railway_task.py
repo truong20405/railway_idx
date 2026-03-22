@@ -265,6 +265,50 @@ def extract_first_email(text: str):
     return match.group(0) if match else None
 
 
+def extract_gmail_feed_account_email(content: str):
+    if not content:
+        return None
+
+    author_email = re.search(
+        r"<author>\s*<name>.*?</name>\s*<email>\s*([^<\s]+)\s*</email>\s*</author>",
+        content,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if author_email:
+        return author_email.group(1).strip()
+
+    return extract_first_email(content)
+
+
+def has_google_auth_challenge(content: str) -> bool:
+    if not content:
+        return False
+    lower = content.lower()
+    markers = [
+        "accounts.google.com/v3/signin",
+        "service=mail",
+        "choose an account",
+        "id=\"identifierid\"",
+        "id=\"identifiernext\"",
+        "name=\"password\"",
+        "challengepickerlist",
+        "to continue to gmail",
+        "to continue to firebase",
+    ]
+    return any(marker in lower for marker in markers)
+
+
+def looks_like_gmail_atom_feed(content: str) -> bool:
+    if not content:
+        return False
+    lower = content.lower()
+    if "<feed" not in lower:
+        return False
+    if "<author>" in lower and "<fullcount>" in lower:
+        return True
+    return "gmail - inbox for" in lower
+
+
 async def wait_for_firebase_ready(tab, account_name: str, timeout: int = 25) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -274,13 +318,16 @@ async def wait_for_firebase_ready(tab, account_name: str, timeout: int = 25) -> 
         if "studio.firebase.google.com" in (current_url or "").lower():
             try:
                 content = await tab.get_content()
+                if has_google_auth_challenge(content):
+                    log.warning("[%s] Trang Firebase yeu cau dang nhap", account_name)
+                    return False
                 if content and len(content) > 1500:
                     return True
             except Exception:
                 pass
         await asyncio.sleep(1)
-    log.warning("[%s] Firebase load cham/khong on dinh truoc khi chup anh", account_name)
-    return True
+    log.warning("[%s] Firebase load cham/khong xac nhan duoc da dang nhap", account_name)
+    return False
 
 
 async def save_screenshot_with_retry(tab, shot_path: Path, account_name: str, retries: int = 5) -> bool:
@@ -520,7 +567,15 @@ async def verify_google_identity(browser, account: dict):
     except Exception:
         pass
 
-    detected_email = extract_first_email(content)
+    if has_google_auth_challenge(content):
+        log.info("[%s] Trang xac minh cho thay chua dang nhap Google", account_name)
+        return False, None
+
+    if not looks_like_gmail_atom_feed(content):
+        log.warning("[%s] Khong xac minh duoc session Gmail feed (co the chua dang nhap)", account_name)
+        return False, None
+
+    detected_email = extract_gmail_feed_account_email(content)
     if detected_email:
         detected_lower = detected_email.strip().lower()
         if expected_email and detected_lower != expected_email:
@@ -534,9 +589,8 @@ async def verify_google_identity(browser, account: dict):
         log.info("[%s] Xac nhan da dang nhap dung account: %s", account_name, detected_email)
         return True, detected_email
 
-    # Fallback: khong lay duoc email nhung khong bi redirect login.
-    log.info("[%s] Co session Google, khong doc duoc email de doi chieu", account_name)
-    return True, None
+    log.warning("[%s] Khong doc duoc email tu Gmail feed, coi nhu chua xac minh", account_name)
+    return False, None
 
 
 async def ensure_firebase_tab(browser, account: dict):
@@ -581,7 +635,11 @@ async def ensure_firebase_tab(browser, account: dict):
         log.error("[%s] Bi day ve trang login khi vao Firebase", account_name)
         return None
 
-    await wait_for_firebase_ready(tab, account_name)
+    firebase_ready = await wait_for_firebase_ready(tab, account_name)
+    if not firebase_ready:
+        log.error("[%s] Firebase chua san sang hoac chua dang nhap dung account", account_name)
+        return None
+
     return tab
 
 
