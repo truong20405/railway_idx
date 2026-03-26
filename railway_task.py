@@ -10,8 +10,10 @@ import random
 import re
 import shutil
 import signal
+import subprocess
 import time
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import nodriver as uc
@@ -22,7 +24,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("railway.log", encoding="utf-8"),
+        RotatingFileHandler("railway.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"),
         logging.StreamHandler(),
     ],
 )
@@ -143,6 +145,7 @@ CRASH_RESTART_BACKOFF_BASE = max(1, env_int("CRASH_RESTART_BACKOFF_BASE", 8))
 CRASH_RESTART_BACKOFF_MAX = max(5, env_int("CRASH_RESTART_BACKOFF_MAX", 60))
 BROWSER_HEALTHCHECK_INTERVAL = max(10, env_int("BROWSER_HEALTHCHECK_INTERVAL", 90))
 BROWSER_HEALTHCHECK_TIMEOUT = max(3, env_int("BROWSER_HEALTHCHECK_TIMEOUT", 10))
+FORCE_KILL_STALE_BROWSER = env_bool("FORCE_KILL_STALE_BROWSER", True)
 
 SCREENSHOT_DIR = Path("screenshots")
 PROFILES_DIR = Path("profiles")
@@ -692,10 +695,120 @@ def build_browser_args(account: dict):
     return browser_args
 
 
+def clear_stale_profile_locks(profile_dir: Path, account_name: str):
+    removed = []
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"):
+        lock_path = profile_dir / lock_name
+        if not lock_path.exists():
+            continue
+        try:
+            lock_path.unlink()
+            removed.append(lock_name)
+        except Exception as e:
+            log.warning("[%s] Khong xoa duoc lock file %s: %s", account_name, lock_name, e)
+    if removed:
+        log.info("[%s] Da don lock profile cu: %s", account_name, ", ".join(removed))
+
+
+def _kill_profile_browser_processes_posix(profile_dir: Path) -> int:
+    try:
+        profile_marker = str(profile_dir.resolve()).lower()
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return 0
+    except Exception:
+        return 0
+
+    pids = []
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        pid_text, cmdline = parts
+        cmdline_lower = cmdline.lower()
+        if "--user-data-dir" not in cmdline_lower:
+            continue
+        if profile_marker not in cmdline_lower:
+            continue
+        if not any(marker in cmdline_lower for marker in ("chrome", "chromium", "msedge")):
+            continue
+        if pid_text.isdigit():
+            pids.append(int(pid_text))
+
+    killed = 0
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except Exception:
+            continue
+    return killed
+
+
+def _kill_profile_browser_processes_windows(profile_dir: Path) -> int:
+    script = r"""
+$profile = $env:IDX_PROFILE_DIR
+if (-not $profile) { Write-Output 0; exit 0 }
+$profile = $profile.ToLowerInvariant()
+$killed = 0
+Get-CimInstance Win32_Process | Where-Object {
+    $_.CommandLine -and $_.Name -match '^(chrome|chromium|msedge)(\.exe)?$'
+} | ForEach-Object {
+    $cmd = $_.CommandLine.ToLowerInvariant()
+    if ($cmd.Contains('--user-data-dir') -and $cmd.Contains($profile)) {
+        try {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+            $killed += 1
+        } catch {}
+    }
+}
+Write-Output $killed
+"""
+    env = os.environ.copy()
+    env["IDX_PROFILE_DIR"] = str(profile_dir.resolve()).lower()
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        for line in reversed(proc.stdout.splitlines()):
+            line = line.strip()
+            if line.isdigit():
+                return int(line)
+    except Exception:
+        return 0
+    return 0
+
+
+def force_kill_profile_browser(profile_dir: Path, account_name: str, reason: str) -> int:
+    if not FORCE_KILL_STALE_BROWSER:
+        return 0
+    if os.name == "nt":
+        killed = _kill_profile_browser_processes_windows(profile_dir)
+    else:
+        killed = _kill_profile_browser_processes_posix(profile_dir)
+    if killed > 0:
+        log.warning("[%s] Force-kill %s process browser cu (%s)", account_name, killed, reason)
+    return killed
+
+
 async def start_browser_for_account(account: dict):
     account_name = account["name"]
     profile_dir = PROFILES_DIR / account_name
     profile_dir.mkdir(parents=True, exist_ok=True)
+    force_kill_profile_browser(profile_dir, account_name, "truoc khi start browser")
+    clear_stale_profile_locks(profile_dir, account_name)
 
     browser_bin = detect_browser_binary()
     if browser_bin:
@@ -719,12 +832,15 @@ async def start_browser_for_account(account: dict):
 
 
 def stop_browser_safely(browser, account_name: str):
-    if not browser:
-        return
+    profile_dir = PROFILES_DIR / account_name
     try:
-        browser.stop()
+        if browser:
+            browser.stop()
     except Exception as e:
         log.warning("[%s] Loi khi dong browser: %s", account_name, e)
+    finally:
+        force_kill_profile_browser(profile_dir, account_name, "sau browser.stop()")
+        clear_stale_profile_locks(profile_dir, account_name)
 
 
 def reset_session_timers(session: dict, now: float | None = None):
@@ -1000,7 +1116,14 @@ async def main():
             for session in sessions:
                 if not global_running:
                     break
-                await keepalive_tick(session)
+                try:
+                    await keepalive_tick(session)
+                except Exception as e:
+                    account_name = session.get("account_name", "unknown")
+                    log.exception("[%s] keepalive_tick crash ngoai du kien: %s", account_name, e)
+                    recovered = await restart_session_browser(session, f"keepalive_tick crash: {e}")
+                    if not recovered:
+                        log.error("[%s] Khong the phuc hoi session sau keepalive_tick crash", account_name)
             await asyncio.sleep(1)
     finally:
         for session in sessions:

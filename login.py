@@ -5,17 +5,18 @@ import os
 import json
 import logging
 import signal
-import sys
+import subprocess
 import gc
 import time
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 # ==================== LOGGING ====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("keepalive.log", encoding="utf-8"),
+        RotatingFileHandler("keepalive.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"),
         logging.StreamHandler(),  # In ra terminal luôn
     ],
 )
@@ -50,6 +51,12 @@ MAX_RELOAD_ERRORS        = 5
 NETWORK_TIMEOUT          = 30
 MAX_RETRIES              = 3
 BROWSER_RESTART_INTERVAL = 3600   # 1 tiếng
+FORCE_KILL_STALE_BROWSER = os.getenv("FORCE_KILL_STALE_BROWSER", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
@@ -79,10 +86,10 @@ global_running = True
 
 # ==================== SIGNAL HANDLER ====================
 def handle_shutdown(sig, frame):
+    del sig, frame
     global global_running
     log.info("Nhận tín hiệu dừng, đang tắt...")
     global_running = False
-    sys.exit(0)
 
 signal.signal(signal.SIGINT,  handle_shutdown)
 signal.signal(signal.SIGTERM, handle_shutdown)
@@ -95,6 +102,125 @@ def mark_logged_in(pstate: ProfileState):
     with open(pstate.login_flag, "w") as f:
         f.write(datetime.now().isoformat())
     log.info(f"[{pstate.name}] [✓] Profile đã lưu: {pstate.profile_dir}")
+
+def clear_stale_profile_locks(profile_dir: str, profile_name: str):
+    removed = []
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"):
+        lock_path = os.path.join(profile_dir, lock_name)
+        if not os.path.exists(lock_path):
+            continue
+        try:
+            os.remove(lock_path)
+            removed.append(lock_name)
+        except Exception as e:
+            log.info(f"[{profile_name}] [-] Khong xoa duoc lock file {lock_name}: {e}")
+    if removed:
+        log.info(f"[{profile_name}] [~] Da don lock profile cu: {', '.join(removed)}")
+
+
+def _kill_profile_browser_processes_posix(profile_dir: str) -> int:
+    try:
+        marker = os.path.abspath(profile_dir).lower()
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return 0
+    except Exception:
+        return 0
+
+    pids = []
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        pid_text, cmdline = parts
+        cmdline_lower = cmdline.lower()
+        if "--user-data-dir" not in cmdline_lower:
+            continue
+        if marker not in cmdline_lower:
+            continue
+        if not any(name in cmdline_lower for name in ("chrome", "chromium", "msedge")):
+            continue
+        if pid_text.isdigit():
+            pids.append(int(pid_text))
+
+    killed = 0
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except Exception:
+            continue
+    return killed
+
+
+def _kill_profile_browser_processes_windows(profile_dir: str) -> int:
+    script = r"""
+$profile = $env:IDX_PROFILE_DIR
+if (-not $profile) { Write-Output 0; exit 0 }
+$profile = $profile.ToLowerInvariant()
+$killed = 0
+Get-CimInstance Win32_Process | Where-Object {
+    $_.CommandLine -and $_.Name -match '^(chrome|chromium|msedge)(\.exe)?$'
+} | ForEach-Object {
+    $cmd = $_.CommandLine.ToLowerInvariant()
+    if ($cmd.Contains('--user-data-dir') -and $cmd.Contains($profile)) {
+        try {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+            $killed += 1
+        } catch {}
+    }
+}
+Write-Output $killed
+"""
+    env = os.environ.copy()
+    env["IDX_PROFILE_DIR"] = os.path.abspath(profile_dir).lower()
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        for line in reversed(proc.stdout.splitlines()):
+            value = line.strip()
+            if value.isdigit():
+                return int(value)
+    except Exception:
+        return 0
+    return 0
+
+
+def force_kill_profile_browser(profile_dir: str, profile_name: str, reason: str) -> int:
+    if not FORCE_KILL_STALE_BROWSER:
+        return 0
+    if os.name == "nt":
+        killed = _kill_profile_browser_processes_windows(profile_dir)
+    else:
+        killed = _kill_profile_browser_processes_posix(profile_dir)
+    if killed > 0:
+        log.info(f"[{profile_name}] [~] Force-kill {killed} process browser cu ({reason})")
+    return killed
+
+
+def stop_browser_safely(browser, pstate: ProfileState):
+    try:
+        if browser:
+            browser.stop()
+    except Exception as e:
+        log.info(f"[{pstate.name}] [-] Loi khi stop browser: {e}")
+    finally:
+        force_kill_profile_browser(pstate.profile_dir, pstate.name, "sau browser.stop()")
+        clear_stale_profile_locks(pstate.profile_dir, pstate.name)
+
 
 async def wait_for_element(tab, selector: str, timeout: int = 15):
     deadline = time.time() + timeout
@@ -381,6 +507,9 @@ async def run_profile(account: dict):
 
         browser = None
         try:
+            force_kill_profile_browser(pstate.profile_dir, pstate.name, "truoc khi start browser")
+            clear_stale_profile_locks(pstate.profile_dir, pstate.name)
+
             # Cấu hình Chrome
             browser_args = [
                 f"--user-agent={USER_AGENT}",
@@ -451,11 +580,7 @@ async def run_profile(account: dict):
                 except asyncio.CancelledError:
                     pass
 
-            if browser:
-                try:
-                    browser.stop()
-                except Exception:
-                    pass
+            stop_browser_safely(browser, pstate)
 
             pstate.current_tab = None
             gc.collect()
