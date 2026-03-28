@@ -31,7 +31,7 @@ LOGIN_STAGGER_SECONDS=60
 SCREENSHOT_INTERVAL=10
 NAVIGATION_TIMEOUT=30
 MAX_NAV_RETRIES=3
-MAX_CONCURRENT_ACCOUNTS=1
+MAX_CONCURRENT_ACCOUNTS=2
 MAIN_LOOP_SLEEP=2
 PROGRAM_RESTART_INTERVAL=86400
 PROGRAM_RESTART_JITTER=300
@@ -65,7 +65,7 @@ SCREENSHOT_DIR=screenshots
 ```
 
 ## 4) Runtime behavior
-- Script chi giu toi da `MAX_CONCURRENT_ACCOUNTS` browser dong thoi (mac dinh `1`, neu can 2 account thi set `2`).
+- Script chi giu toi da `MAX_CONCURRENT_ACCOUNTS` browser dong thoi (mac dinh `2`).
 - Login tuan tu theo thu tu account duoc chon:
   - Login account thu nhat.
   - Cho `LOGIN_STAGGER_SECONDS` (mac dinh 60s).
