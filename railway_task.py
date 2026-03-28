@@ -11,6 +11,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -119,13 +120,19 @@ LOGIN_STAGGER_SECONDS = max(0, env_int("LOGIN_STAGGER_SECONDS", 60))
 SCREENSHOT_INTERVAL = env_int("SCREENSHOT_INTERVAL", 10)  # seconds
 NAVIGATION_TIMEOUT = env_int("NAVIGATION_TIMEOUT", 30)  # seconds
 MAX_NAV_RETRIES = env_int("MAX_NAV_RETRIES", 3)
-# Force sequential flow: account_1 completes before account_2 starts.
-MAX_CONCURRENT_ACCOUNTS = 1
+# Number of active account sessions kept alive at the same time.
+MAX_CONCURRENT_ACCOUNTS = max(1, env_int("MAX_CONCURRENT_ACCOUNTS", 1))
+MAIN_LOOP_SLEEP = max(1, env_int("MAIN_LOOP_SLEEP", 2))
+PROGRAM_RESTART_INTERVAL = max(0, env_int("PROGRAM_RESTART_INTERVAL", 24 * 3600))
+PROGRAM_RESTART_JITTER = max(0, env_int("PROGRAM_RESTART_JITTER", 300))
+EXIT_ON_PROGRAM_RESTART = env_bool("EXIT_ON_PROGRAM_RESTART", False)
 ENABLE_SCREENSHOT = env_bool("ENABLE_SCREENSHOT", False)
 MEMORY_SAVER = env_bool("MEMORY_SAVER", True)
 AUTO_LIMIT_BY_RAM = env_bool("AUTO_LIMIT_BY_RAM", False)
 ESTIMATED_RAM_PER_ACCOUNT_MB = max(128, env_int("ESTIMATED_RAM_PER_ACCOUNT_MB", 650))
 RAM_RESERVE_MB = max(128, env_int("RAM_RESERVE_MB", 256))
+SESSION_RECOVERY_COOLDOWN = max(5, env_int("SESSION_RECOVERY_COOLDOWN", 30))
+TAB_PRUNE_INTERVAL = max(30, env_int("TAB_PRUNE_INTERVAL", 180))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8431444806:AAFuLZnElTNtLoVBTTiVtnzKonkM00wE2h4").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5788963050").strip()
 TELEGRAM_THREAD_ID = os.getenv("TELEGRAM_THREAD_ID", "").strip()
@@ -147,10 +154,10 @@ BROWSER_HEALTHCHECK_INTERVAL = max(10, env_int("BROWSER_HEALTHCHECK_INTERVAL", 9
 BROWSER_HEALTHCHECK_TIMEOUT = max(3, env_int("BROWSER_HEALTHCHECK_TIMEOUT", 10))
 FORCE_KILL_STALE_BROWSER = env_bool("FORCE_KILL_STALE_BROWSER", True)
 
-SCREENSHOT_DIR = Path("screenshots")
-PROFILES_DIR = Path("profiles")
-SCREENSHOT_DIR.mkdir(exist_ok=True)
-PROFILES_DIR.mkdir(exist_ok=True)
+SCREENSHOT_DIR = Path(os.getenv("SCREENSHOT_DIR", "screenshots")).expanduser()
+PROFILES_DIR = Path(os.getenv("PROFILES_DIR", "profiles")).expanduser()
+SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
 GMAIL_LOGIN_URL = (
     "https://accounts.google.com/v3/signin/identifier"
@@ -443,6 +450,60 @@ async def safe_navigate(browser, url: str, account_name: str, timeout: int = NAV
     return None
 
 
+def is_same_tab(tab_a, tab_b) -> bool:
+    if tab_a is tab_b:
+        return True
+    if not tab_a or not tab_b:
+        return False
+    target_a = getattr(tab_a, "target", None)
+    target_b = getattr(tab_b, "target", None)
+    id_a = getattr(target_a, "target_id", None) or getattr(target_a, "id", None)
+    id_b = getattr(target_b, "target_id", None) or getattr(target_b, "id", None)
+    return bool(id_a and id_b and id_a == id_b)
+
+
+async def close_tab_safely(tab, account_name: str, reason: str) -> bool:
+    if not tab:
+        return False
+    close_fn = getattr(tab, "close", None)
+    if not callable(close_fn):
+        return False
+    try:
+        maybe_awaitable = close_fn()
+        if asyncio.iscoroutine(maybe_awaitable):
+            await asyncio.wait_for(maybe_awaitable, timeout=10)
+        return True
+    except Exception as e:
+        log.debug("[%s] Khong dong duoc tab (%s): %s", account_name, reason, e)
+        return False
+
+
+async def prune_browser_tabs(browser, keep_tab, account_name: str, reason: str):
+    tabs = getattr(browser, "tabs", None)
+    if not tabs:
+        return
+    try:
+        tab_list = list(tabs)
+    except Exception:
+        return
+    if len(tab_list) <= 1:
+        return
+
+    if keep_tab and not any(is_same_tab(t, keep_tab) for t in tab_list):
+        # Fallback an toan neu nodriver tra object tab moi.
+        keep_tab = tab_list[-1]
+
+    closed = 0
+    for tab in tab_list:
+        if keep_tab and is_same_tab(tab, keep_tab):
+            continue
+        if await close_tab_safely(tab, account_name, reason):
+            closed += 1
+
+    if closed:
+        log.info("[%s] Da dong %s tab du (%s)", account_name, closed, reason)
+
+
 async def handle_recovery(tab, account_name: str, recovery_email: str) -> bool:
     log.info("[%s] Dang xu ly recovery email...", account_name)
     try:
@@ -663,6 +724,7 @@ async def ensure_firebase_tab(browser, account: dict):
         log.error("[%s] Firebase chua san sang hoac chua dang nhap dung account", account_name)
         return None
 
+    await prune_browser_tabs(browser, tab, account_name, "sau ensure_firebase_tab")
     return tab
 
 
@@ -849,6 +911,7 @@ def reset_session_timers(session: dict, now: float | None = None):
     session["next_shot"] = current + SCREENSHOT_INTERVAL
     session["next_telegram_photo"] = current + TELEGRAM_PHOTO_INTERVAL
     session["next_healthcheck"] = current + BROWSER_HEALTHCHECK_INTERVAL
+    session["next_tab_prune"] = current + TAB_PRUNE_INTERVAL
     if BROWSER_RESTART_INTERVAL > 0:
         session["next_browser_restart"] = current + BROWSER_RESTART_INTERVAL
     else:
@@ -894,6 +957,7 @@ async def restart_session_browser(session: dict, reason: str) -> bool:
             session["tab"] = new_tab
             session["consecutive_failures"] = 0
             session["crash_recoveries"] = session.get("crash_recoveries", 0) + 1
+            session["next_recover_retry_at"] = 0
             reset_session_timers(session)
 
             log.info(
@@ -909,6 +973,7 @@ async def restart_session_browser(session: dict, reason: str) -> bool:
             stop_browser_safely(new_browser, account_name)
 
     log.error("[%s] Khong mo lai duoc profile sau %s lan thu", account_name, CRASH_RESTART_ATTEMPTS)
+    session["next_recover_retry_at"] = time.time() + SESSION_RECOVERY_COOLDOWN
     if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
         await send_telegram_message(f"[{account_name}] Khong the mo lai profile sau su co: {reason}")
     return False
@@ -943,7 +1008,9 @@ async def init_account_session(account: dict):
             "next_shot": now + SCREENSHOT_INTERVAL,
             "next_telegram_photo": now + TELEGRAM_PHOTO_INTERVAL,
             "next_healthcheck": now + BROWSER_HEALTHCHECK_INTERVAL,
+            "next_tab_prune": now + TAB_PRUNE_INTERVAL,
             "next_browser_restart": (now + BROWSER_RESTART_INTERVAL) if BROWSER_RESTART_INTERVAL > 0 else float("inf"),
+            "next_recover_retry_at": 0,
             "reload_count": 0,
             "consecutive_failures": 0,
             "crash_recoveries": 0,
@@ -961,6 +1028,9 @@ async def keepalive_tick(session: dict):
     browser = session.get("browser")
     tab = session.get("tab")
     now = time.time()
+    retry_after = session.get("next_recover_retry_at", 0)
+    if now < retry_after:
+        return
 
     if not browser or not tab:
         await restart_session_browser(session, "mat browser/tab trong keep-alive")
@@ -979,6 +1049,10 @@ async def keepalive_tick(session: dict):
             else:
                 await restart_session_browser(session, "healthcheck fail, khong phuc hoi tab")
             return
+
+    if now >= session.get("next_tab_prune", 0):
+        await prune_browser_tabs(browser, tab, account_name, "dinh ky")
+        session["next_tab_prune"] = now + TAB_PRUNE_INTERVAL
 
     if now >= session.get("next_browser_restart", float("inf")):
         log.info(
@@ -1058,10 +1132,16 @@ async def keepalive_tick(session: dict):
 
 async def main():
     mode = "login-tuan-tu + keepalive-song-hanh"
+    restart_deadline = float("inf")
+    if PROGRAM_RESTART_INTERVAL > 0:
+        restart_deadline = time.time() + PROGRAM_RESTART_INTERVAL + random.randint(0, PROGRAM_RESTART_JITTER)
+
     log.info(
         (
             "Cau hinh: mode=%s, reload_interval=%ss, login_stagger=%ss, screenshot=%s, "
-            "memory_saver=%s, telegram=%s, restart_attempts=%s, max_failures=%s, browser_restart=%ss"
+            "memory_saver=%s, telegram=%s, restart_attempts=%s, max_failures=%s, "
+            "browser_restart=%ss, tab_prune=%ss, loop_sleep=%ss, "
+            "program_restart=%ss(+%ss), profiles_dir=%s"
         ),
         mode,
         RELOAD_INTERVAL,
@@ -1072,6 +1152,11 @@ async def main():
         CRASH_RESTART_ATTEMPTS,
         MAX_KEEPALIVE_FAILURES,
         BROWSER_RESTART_INTERVAL,
+        TAB_PRUNE_INTERVAL,
+        MAIN_LOOP_SLEEP,
+        PROGRAM_RESTART_INTERVAL,
+        PROGRAM_RESTART_JITTER,
+        PROFILES_DIR.resolve(),
     )
     if (
         TELEGRAM_SEND_SCREENSHOT
@@ -1093,8 +1178,27 @@ async def main():
         )
 
     sessions = []
+    self_restart_requested = False
+    enabled_accounts = [account for account in ACCOUNTS if account.get("email") and account.get("password")]
+    if not enabled_accounts:
+        log.error("Khong co account hop le (thieu email/password). Dung chuong trinh.")
+        return
+
+    requested_slots = min(len(enabled_accounts), MAX_CONCURRENT_ACCOUNTS)
+    effective_slots = compute_effective_concurrency(requested_slots)
+    run_accounts = enabled_accounts[:effective_slots]
+
+    if effective_slots < len(enabled_accounts):
+        log.warning(
+            "Chi chay %s/%s account de giam tai RAM (MAX_CONCURRENT_ACCOUNTS=%s, AUTO_LIMIT_BY_RAM=%s)",
+            effective_slots,
+            len(enabled_accounts),
+            MAX_CONCURRENT_ACCOUNTS,
+            AUTO_LIMIT_BY_RAM,
+        )
+
     try:
-        for idx, account in enumerate(ACCOUNTS):
+        for idx, account in enumerate(run_accounts):
             if not global_running:
                 break
             session = await init_account_session(account)
@@ -1103,8 +1207,8 @@ async def main():
             else:
                 log.error("[%s] Khoi tao session that bai", account["name"])
 
-            if idx < len(ACCOUNTS) - 1 and global_running:
-                log.info("Cho %ss truoc khi mo %s", LOGIN_STAGGER_SECONDS, ACCOUNTS[idx + 1]["name"])
+            if idx < len(run_accounts) - 1 and global_running:
+                log.info("Cho %ss truoc khi mo %s", LOGIN_STAGGER_SECONDS, run_accounts[idx + 1]["name"])
                 await asyncio.sleep(LOGIN_STAGGER_SECONDS)
 
         if not sessions:
@@ -1113,6 +1217,13 @@ async def main():
 
         log.info("Da khoi tao %s/%s session, bat dau vong keep-alive", len(sessions), len(ACCOUNTS))
         while global_running:
+            if time.time() >= restart_deadline:
+                self_restart_requested = True
+                log.warning("Den lich tu reboot chuong trinh de lam moi tai nguyen.")
+                if TELEGRAM_SEND_EVENTS and is_telegram_enabled():
+                    await send_telegram_message("Runner tu reboot sau chu ky 24h de lam moi tai nguyen")
+                break
+
             for session in sessions:
                 if not global_running:
                     break
@@ -1124,7 +1235,7 @@ async def main():
                     recovered = await restart_session_browser(session, f"keepalive_tick crash: {e}")
                     if not recovered:
                         log.error("[%s] Khong the phuc hoi session sau keepalive_tick crash", account_name)
-            await asyncio.sleep(1)
+            await asyncio.sleep(MAIN_LOOP_SLEEP)
     finally:
         for session in sessions:
             browser = session.get("browser")
@@ -1133,6 +1244,14 @@ async def main():
                 continue
             stop_browser_safely(browser, account_name)
             log.info("[%s] Browser da dong", account_name)
+
+    if self_restart_requested:
+        script_path = str(Path(__file__).resolve())
+        if EXIT_ON_PROGRAM_RESTART:
+            log.warning("Thoat process (code=75) de Railway khoi dong lai service: %s", script_path)
+            raise SystemExit(75)
+        log.warning("Exec lai process Python de reboot chuong trinh: %s", script_path)
+        os.execv(sys.executable, [sys.executable, script_path])
 
     log.info("Da dung toan bo chuong trinh.")
 
