@@ -1,4 +1,4 @@
-import nodriver as uc
+﻿import nodriver as uc
 import asyncio
 import random
 import os
@@ -9,48 +9,35 @@ import subprocess
 import gc
 import time
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
 
 # ==================== LOGGING ====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        RotatingFileHandler("keepalive.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"),
-        logging.StreamHandler(),  # In ra terminal luôn
-    ],
+    handlers=[logging.StreamHandler()],  # In ra terminal
 )
 log = logging.getLogger(__name__)
 
-# ==================== CẤU HÌNH 2 ACCOUNT ====================
+# ==================== Cáº¤U HÃŒNH 2 ACCOUNT ====================
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 ACCOUNTS = [
-    {
-        "name": "profile_1",
-        "email": os.getenv("GOOGLE_EMAIL_1", "phu413271@gmail.com"),
-        "password": os.getenv("GOOGLE_PASSWORD_1", "nvt2005S!"),
-        "recovery": os.getenv("RECOVERY_EMAIL_1", "mail2@hunght1890.com"),
-        "proxy": os.getenv("PROXY_1", "http://45.137.70.90:2433"),
-        "use_proxy_after_login": True,   # Sau login vẫn dùng proxy
-        "firebase_url": "https://studio.firebase.google.com/windows-idx-97840365",
-    },
     {
         "name": "profile_2",
         "email": os.getenv("GOOGLE_EMAIL_2", "vanlong1999u@gmail.com"),
         "password": os.getenv("GOOGLE_PASSWORD_2", "truongnguyen"),
         "recovery": os.getenv("RECOVERY_EMAIL_2", "mail3@hunght1890.com"),
         "proxy": os.getenv("PROXY_2", "http://45.137.70.90:2433"),
-        "use_proxy_after_login": False,  # Sau login không dùng proxy
+        "use_proxy_after_login": False,  # Sau login khÃ´ng dÃ¹ng proxy
         "firebase_url": "https://studio.firebase.google.com/idxvpsgit-74148240",
     },
 ]
 
-RELOAD_INTERVAL          = 300    # 5 phút
-SCREENSHOT_INTERVAL      = 5     # 5 giây
+RELOAD_INTERVAL          = 300    # 5 phÃºt
+SCREENSHOT_INTERVAL      = 5     # 5 giÃ¢y
 MAX_RELOAD_ERRORS        = 5
 NETWORK_TIMEOUT          = 30
 MAX_RETRIES              = 3
-BROWSER_RESTART_INTERVAL = 3600   # 1 tiếng
+BROWSER_RESTART_INTERVAL = 3600   # 1 tiáº¿ng
 FORCE_KILL_STALE_BROWSER = os.getenv("FORCE_KILL_STALE_BROWSER", "1").strip().lower() in {
     "1",
     "true",
@@ -61,7 +48,7 @@ FORCE_KILL_STALE_BROWSER = os.getenv("FORCE_KILL_STALE_BROWSER", "1").strip().lo
 SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
-# Tạo thư mục profile riêng cho mỗi account
+# Táº¡o thÆ° má»¥c profile riÃªng cho má»—i account
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 for acc in ACCOUNTS:
     profile_dir = os.path.join(BASE_DIR, f"chrome_{acc['name']}")
@@ -69,7 +56,7 @@ for acc in ACCOUNTS:
 
 # ==================== SHARED STATE PER PROFILE ====================
 class ProfileState:
-    """Trạng thái riêng cho mỗi profile"""
+    """Tráº¡ng thÃ¡i riÃªng cho má»—i profile"""
     def __init__(self, name: str):
         self.name = name
         self.current_tab = None
@@ -79,16 +66,16 @@ class ProfileState:
         self.session_start = time.time()
         self.profile_dir = os.path.join(BASE_DIR, f"chrome_{name}")
         self.login_flag = os.path.join(self.profile_dir, "login_done.flag")
-        self.firebase_url = ""  # Sẽ được gán từ account config
+        self.firebase_url = ""  # Sáº½ Ä‘Æ°á»£c gÃ¡n tá»« account config
 
-# Flag toàn cục để dừng tất cả
+# Flag toÃ n cá»¥c Ä‘á»ƒ dá»«ng táº¥t cáº£
 global_running = True
 
 # ==================== SIGNAL HANDLER ====================
 def handle_shutdown(sig, frame):
     del sig, frame
     global global_running
-    log.info("Nhận tín hiệu dừng, đang tắt...")
+    log.info("Nháº­n tÃ­n hiá»‡u dá»«ng, Ä‘ang táº¯t...")
     global_running = False
 
 signal.signal(signal.SIGINT,  handle_shutdown)
@@ -101,7 +88,7 @@ def is_logged_in(pstate: ProfileState) -> bool:
 def mark_logged_in(pstate: ProfileState):
     with open(pstate.login_flag, "w") as f:
         f.write(datetime.now().isoformat())
-    log.info(f"[{pstate.name}] [✓] Profile đã lưu: {pstate.profile_dir}")
+    log.info(f"[{pstate.name}] [âœ“] Profile Ä‘Ã£ lÆ°u: {pstate.profile_dir}")
 
 def clear_stale_profile_locks(profile_dir: str, profile_name: str):
     removed = []
@@ -251,21 +238,21 @@ async def click_next(tab) -> bool:
     return False
 
 async def safe_navigate(browser, url: str, pstate: ProfileState, retries: int = 3):
-    """Điều hướng với timeout và retry"""
+    """Äiá»u hÆ°á»›ng vá»›i timeout vÃ  retry"""
     for attempt in range(1, retries + 1):
         try:
             tab = await asyncio.wait_for(browser.get(url), timeout=NETWORK_TIMEOUT)
             return tab
         except asyncio.TimeoutError:
-            log.warning(f"[{pstate.name}] Timeout navigate lần {attempt}/{retries}: {url}")
+            log.warning(f"[{pstate.name}] Timeout navigate láº§n {attempt}/{retries}: {url}")
         except Exception as e:
-            log.warning(f"[{pstate.name}] Lỗi navigate lần {attempt}/{retries}: {e}")
+            log.warning(f"[{pstate.name}] Lá»—i navigate láº§n {attempt}/{retries}: {e}")
         await asyncio.sleep(5 * attempt)
     return None
 
-# ==================== SCREENSHOT (mỗi profile riêng) ====================
+# ==================== SCREENSHOT (má»—i profile riÃªng) ====================
 async def continuous_screenshot(pstate: ProfileState):
-    """Chụp ảnh từ pstate.current_tab mỗi 5s, lưu tên riêng"""
+    """Chá»¥p áº£nh tá»« pstate.current_tab má»—i 5s, lÆ°u tÃªn riÃªng"""
     path = os.path.join(SCREENSHOT_DIR, f"{pstate.name}.png")
     while pstate.running and global_running:
         try:
@@ -273,18 +260,18 @@ async def continuous_screenshot(pstate: ProfileState):
             if tab is not None:
                 await tab.save_screenshot(path)
         except Exception:
-            pass  # Tab có thể đang reload, bỏ qua
+            pass  # Tab cÃ³ thá»ƒ Ä‘ang reload, bá» qua
         await asyncio.sleep(SCREENSHOT_INTERVAL)
 
 def restart_screenshot_task(pstate: ProfileState):
-    """Hủy task cũ và tạo task mới"""
+    """Há»§y task cÅ© vÃ  táº¡o task má»›i"""
     if pstate.screenshot_task and not pstate.screenshot_task.done():
         pstate.screenshot_task.cancel()
     pstate.screenshot_task = asyncio.create_task(continuous_screenshot(pstate))
 
 # ==================== RECOVERY EMAIL ====================
 async def handle_recovery(tab, pstate: ProfileState, recovery_email: str) -> bool:
-    log.info(f"[{pstate.name}] [*] Xử lý xác minh email khôi phục...")
+    log.info(f"[{pstate.name}] [*] Xá»­ lÃ½ xÃ¡c minh email khÃ´i phá»¥c...")
     try:
         recovery_option = None
 
@@ -293,7 +280,7 @@ async def handle_recovery(tab, pstate: ProfileState, recovery_email: str) -> boo
                 elements = await tab.find_all(selector, timeout=2)
                 for el in elements:
                     el_text = str(getattr(el, "text", "") or getattr(el, "text_all", "") or "")
-                    if "recovery" in el_text.lower() or "khôi phục" in el_text.lower():
+                    if "recovery" in el_text.lower() or "khÃ´i phá»¥c" in el_text.lower():
                         recovery_option = el
                         break
                 if recovery_option:
@@ -311,7 +298,7 @@ async def handle_recovery(tab, pstate: ProfileState, recovery_email: str) -> boo
                     continue
 
         if not recovery_option:
-            log.info(f"[{pstate.name}] [-] Không tìm thấy recovery option")
+            log.info(f"[{pstate.name}] [-] KhÃ´ng tÃ¬m tháº¥y recovery option")
             return False
 
         await recovery_option.click()
@@ -332,7 +319,7 @@ async def handle_recovery(tab, pstate: ProfileState, recovery_email: str) -> boo
                 continue
 
         if not recovery_input:
-            log.info(f"[{pstate.name}] [-] Không tìm thấy ô nhập recovery email")
+            log.info(f"[{pstate.name}] [-] KhÃ´ng tÃ¬m tháº¥y Ã´ nháº­p recovery email")
             return False
 
         await recovery_input.click()
@@ -340,18 +327,18 @@ async def handle_recovery(tab, pstate: ProfileState, recovery_email: str) -> boo
         await human_type(recovery_input, recovery_email)
         await asyncio.sleep(0.5)
         await click_next(tab)
-        log.info(f"[{pstate.name}] [✓] Đã điền recovery: {recovery_email}")
+        log.info(f"[{pstate.name}] [âœ“] ÄÃ£ Ä‘iá»n recovery: {recovery_email}")
         return True
 
     except Exception as e:
-        log.info(f"[{pstate.name}] [-] Lỗi recovery: {e}")
+        log.info(f"[{pstate.name}] [-] Lá»—i recovery: {e}")
         return False
 
 # ==================== KEEP-ALIVE PER PROFILE ====================
 async def keep_alive(browser, pstate: ProfileState):
     """
-    Reload định kỳ mỗi 5 phút, tự recover khi lỗi.
-    Sau BROWSER_RESTART_INTERVAL (1 tiếng) trả về 'restart'
+    Reload Ä‘á»‹nh ká»³ má»—i 5 phÃºt, tá»± recover khi lá»—i.
+    Sau BROWSER_RESTART_INTERVAL (1 tiáº¿ng) tráº£ vá» 'restart'
     """
     reload_count       = 0
     consecutive_errors = 0
@@ -361,7 +348,7 @@ async def keep_alive(browser, pstate: ProfileState):
         if time.time() - browser_start_time >= BROWSER_RESTART_INTERVAL:
             elapsed_min = int((time.time() - browser_start_time) / 60)
             log.info(
-                f"[{pstate.name}] ⏰ Đã chạy {elapsed_min} phút — Tắt Chrome, dọn RAM, khởi động lại..."
+                f"[{pstate.name}] â° ÄÃ£ cháº¡y {elapsed_min} phÃºt â€” Táº¯t Chrome, dá»n RAM, khá»Ÿi Ä‘á»™ng láº¡i..."
             )
             return "restart"
 
@@ -390,38 +377,38 @@ async def keep_alive(browser, pstate: ProfileState):
 
             time_to_restart = int((BROWSER_RESTART_INTERVAL - (time.time() - browser_start_time)) / 60)
             log.info(
-                f"[{pstate.name}] [✓] Reload #{reload_count} OK | Uptime: {uptime_min} phút "
-                f"| Restart browser sau: ~{time_to_restart} phút"
+                f"[{pstate.name}] [âœ“] Reload #{reload_count} OK | Uptime: {uptime_min} phÃºt "
+                f"| Restart browser sau: ~{time_to_restart} phÃºt"
             )
 
             if reload_count % 10 == 0:
                 gc.collect()
-                log.info(f"[{pstate.name}] [~] GC chạy xong | Reload tổng: {reload_count}")
+                log.info(f"[{pstate.name}] [~] GC cháº¡y xong | Reload tá»•ng: {reload_count}")
 
         except Exception as e:
             consecutive_errors += 1
             pstate.reload_error_count += 1
             log.info(
-                f"[{pstate.name}] [-] Reload lỗi lần {consecutive_errors}/{MAX_RELOAD_ERRORS}: {e}"
+                f"[{pstate.name}] [-] Reload lá»—i láº§n {consecutive_errors}/{MAX_RELOAD_ERRORS}: {e}"
             )
 
             if consecutive_errors >= MAX_RELOAD_ERRORS:
                 log.info(
-                    f"[{pstate.name}] ⚠️ Quá nhiều lỗi reload! Đang mở lại tab Firebase..."
+                    f"[{pstate.name}] âš ï¸ QuÃ¡ nhiá»u lá»—i reload! Äang má»Ÿ láº¡i tab Firebase..."
                 )
                 new_tab = await safe_navigate(browser, pstate.firebase_url, pstate)
                 if new_tab:
                     pstate.current_tab = new_tab
                     consecutive_errors = 0
-                    log.info(f"[{pstate.name}] [✓] Tab mới OK, tiếp tục keep-alive")
+                    log.info(f"[{pstate.name}] [âœ“] Tab má»›i OK, tiáº¿p tá»¥c keep-alive")
                 else:
-                    log.info(f"[{pstate.name}] ❌ Không thể mở tab mới! Dừng profile.")
+                    log.info(f"[{pstate.name}] âŒ KhÃ´ng thá»ƒ má»Ÿ tab má»›i! Dá»«ng profile.")
                     pstate.running = False
                     break
 
-# ==================== ĐĂNG NHẬP PER PROFILE ====================
+# ==================== ÄÄ‚NG NHáº¬P PER PROFILE ====================
 async def do_login(browser, pstate: ProfileState, account: dict) -> bool:
-    """Thực hiện đăng nhập Gmail cho 1 profile"""
+    """Thá»±c hiá»‡n Ä‘Äƒng nháº­p Gmail cho 1 profile"""
     GMAIL_LOGIN_URL = (
         "https://accounts.google.com/v3/signin/identifier"
         "?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F"
@@ -430,40 +417,40 @@ async def do_login(browser, pstate: ProfileState, account: dict) -> bool:
 
     tab = await safe_navigate(browser, GMAIL_LOGIN_URL, pstate)
     if not tab:
-        log.info(f"[{pstate.name}] ❌ Không thể mở trang đăng nhập")
+        log.info(f"[{pstate.name}] âŒ KhÃ´ng thá»ƒ má»Ÿ trang Ä‘Äƒng nháº­p")
         return False
 
     pstate.current_tab = tab
     restart_screenshot_task(pstate)
 
-    # Bước 1: Email
-    log.info(f"[{pstate.name}] [1] Nhập Email: {account['email']}...")
+    # BÆ°á»›c 1: Email
+    log.info(f"[{pstate.name}] [1] Nháº­p Email: {account['email']}...")
     email_inp = await wait_for_element(tab, "input[type='email']")
     if not email_inp:
-        log.info(f"[{pstate.name}] [-] Không tìm thấy ô email")
+        log.info(f"[{pstate.name}] [-] KhÃ´ng tÃ¬m tháº¥y Ã´ email")
         return False
     await email_inp.click()
     await human_type(email_inp, account["email"])
     await click_next(tab)
     await asyncio.sleep(4)
 
-    # Bước 2: Password
-    log.info(f"[{pstate.name}] [2] Nhập Mật khẩu...")
+    # BÆ°á»›c 2: Password
+    log.info(f"[{pstate.name}] [2] Nháº­p Máº­t kháº©u...")
     pw_inp = await wait_for_element(tab, "input[type='password']", timeout=10)
     if not pw_inp:
-        log.info(f"[{pstate.name}] [!] Không thấy ô mật khẩu")
+        log.info(f"[{pstate.name}] [!] KhÃ´ng tháº¥y Ã´ máº­t kháº©u")
     else:
         await pw_inp.click()
         await human_type(pw_inp, account["password"])
         await click_next(tab)
         await asyncio.sleep(5)
 
-    # Bước 3: Kiểm tra kết quả
+    # BÆ°á»›c 3: Kiá»ƒm tra káº¿t quáº£
     for i in range(20):
         url = tab.target.url
 
         if "mail.google.com" in url or "myaccount.google.com" in url:
-            log.info(f"[{pstate.name}] ✅ ĐĂNG NHẬP THÀNH CÔNG!")
+            log.info(f"[{pstate.name}] âœ… ÄÄ‚NG NHáº¬P THÃ€NH CÃ”NG!")
             mark_logged_in(pstate)
             return True
 
@@ -472,24 +459,24 @@ async def do_login(browser, pstate: ProfileState, account: dict) -> bool:
         except Exception:
             content_lower = ""
 
-        if "recovery" in content_lower or "khôi phục" in content_lower:
+        if "recovery" in content_lower or "khÃ´i phá»¥c" in content_lower:
             await handle_recovery(tab, pstate, account["recovery"])
             await asyncio.sleep(5)
             continue
 
         if "denied" in content_lower or "blocked" in content_lower:
-            log.info(f"[{pstate.name}] ❌ Tài khoản bị chặn!")
+            log.info(f"[{pstate.name}] âŒ TÃ i khoáº£n bá»‹ cháº·n!")
             return False
 
-        log.info(f"[{pstate.name}] [#] Chờ... lần {i+1}/20 | {url[:50]}")
+        log.info(f"[{pstate.name}] [#] Chá»... láº§n {i+1}/20 | {url[:50]}")
         await asyncio.sleep(3)
 
-    log.info(f"[{pstate.name}] [-] Hết thời gian chờ đăng nhập")
+    log.info(f"[{pstate.name}] [-] Háº¿t thá»i gian chá» Ä‘Äƒng nháº­p")
     return False
 
 # ==================== MAIN LOOP PER PROFILE ====================
 async def run_profile(account: dict):
-    """Vòng lặp chính cho 1 profile, chạy độc lập"""
+    """VÃ²ng láº·p chÃ­nh cho 1 profile, cháº¡y Ä‘á»™c láº­p"""
     pstate = ProfileState(account["name"])
     pstate.firebase_url = account["firebase_url"]
     attempt = 0
@@ -498,9 +485,9 @@ async def run_profile(account: dict):
         attempt += 1
         log.info(
             f"[{pstate.name}] {'='*40}\n"
-            f"  Lần khởi động #{attempt}\n"
+            f"  Láº§n khá»Ÿi Ä‘á»™ng #{attempt}\n"
             f"  Email: {account['email']}\n"
-            f"  Proxy: {account['proxy'] or 'Không dùng'}\n"
+            f"  Proxy: {account['proxy'] or 'KhÃ´ng dÃ¹ng'}\n"
             f"  Logged in: {is_logged_in(pstate)}\n"
             f"{'='*40}"
         )
@@ -510,7 +497,7 @@ async def run_profile(account: dict):
             force_kill_profile_browser(pstate.profile_dir, pstate.name, "truoc khi start browser")
             clear_stale_profile_locks(pstate.profile_dir, pstate.name)
 
-            # Cấu hình Chrome
+            # Cáº¥u hÃ¬nh Chrome
             browser_args = [
                 f"--user-agent={USER_AGENT}",
                 "--headless=new",
@@ -523,13 +510,13 @@ async def run_profile(account: dict):
                 "--js-flags=--max-old-space-size=256",
             ]
 
-            # Quyết định dùng proxy hay không
+            # Quyáº¿t Ä‘á»‹nh dÃ¹ng proxy hay khÃ´ng
             if not is_logged_in(pstate):
-                # Chưa login → dùng proxy nếu có
+                # ChÆ°a login â†’ dÃ¹ng proxy náº¿u cÃ³
                 if account["proxy"]:
                     browser_args.insert(0, f"--proxy-server={account['proxy']}")
             else:
-                # Đã login → chỉ dùng proxy nếu use_proxy_after_login=True
+                # ÄÃ£ login â†’ chá»‰ dÃ¹ng proxy náº¿u use_proxy_after_login=True
                 if account["use_proxy_after_login"] and account["proxy"]:
                     browser_args.insert(0, f"--proxy-server={account['proxy']}")
 
@@ -541,19 +528,19 @@ async def run_profile(account: dict):
 
             browser = await uc.start(config=config)
 
-            # Đăng nhập nếu chưa có profile
+            # ÄÄƒng nháº­p náº¿u chÆ°a cÃ³ profile
             if not is_logged_in(pstate):
                 success = await do_login(browser, pstate, account)
                 if not success:
-                    log.info(f"[{pstate.name}] [-] Đăng nhập thất bại, thử lại sau 60s...")
+                    log.info(f"[{pstate.name}] [-] ÄÄƒng nháº­p tháº¥t báº¡i, thá»­ láº¡i sau 60s...")
                     await asyncio.sleep(60)
                     continue
 
-            # Vào Firebase
-            log.info(f"[{pstate.name}] [*] Mở Firebase: {pstate.firebase_url}")
+            # VÃ o Firebase
+            log.info(f"[{pstate.name}] [*] Má»Ÿ Firebase: {pstate.firebase_url}")
             tab = await safe_navigate(browser, pstate.firebase_url, pstate, retries=MAX_RETRIES)
             if not tab:
-                log.info(f"[{pstate.name}] ❌ Không mở được Firebase, restart...")
+                log.info(f"[{pstate.name}] âŒ KhÃ´ng má»Ÿ Ä‘Æ°á»£c Firebase, restart...")
                 await asyncio.sleep(30)
                 continue
 
@@ -561,7 +548,7 @@ async def run_profile(account: dict):
             pstate.session_start = time.time()
             restart_screenshot_task(pstate)
 
-            log.info(f"[{pstate.name}] [✓] Firebase Studio sẵn sàng! Bắt đầu keep-alive...")
+            log.info(f"[{pstate.name}] [âœ“] Firebase Studio sáºµn sÃ ng! Báº¯t Ä‘áº§u keep-alive...")
 
             result = await keep_alive(browser, pstate)
             if result == "restart":
@@ -569,8 +556,8 @@ async def run_profile(account: dict):
                 continue
 
         except Exception as e:
-            log.info(f"[{pstate.name}] ❌ Crash ngoài dự kiến: {e}")
-            log.exception(f"[{pstate.name}] Crash chi tiết:")
+            log.info(f"[{pstate.name}] âŒ Crash ngoÃ i dá»± kiáº¿n: {e}")
+            log.exception(f"[{pstate.name}] Crash chi tiáº¿t:")
 
         finally:
             if pstate.screenshot_task and not pstate.screenshot_task.done():
@@ -592,10 +579,11 @@ async def run_profile(account: dict):
 
 # ==================== ENTRY POINT ====================
 async def run():
-    """Chạy tất cả profile song song"""
-    log.info(f"Bot Firebase Keep-Alive 24/7 khởi động — {len(ACCOUNTS)} profile")
+    """Cháº¡y táº¥t cáº£ profile song song"""
+    log.info(f"Bot Firebase Keep-Alive 24/7 khá»Ÿi Ä‘á»™ng â€” {len(ACCOUNTS)} profile")
     tasks = [run_profile(account) for account in ACCOUNTS]
     await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
     asyncio.get_event_loop().run_until_complete(run())
+

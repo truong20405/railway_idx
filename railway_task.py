@@ -14,7 +14,6 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import nodriver as uc
@@ -24,10 +23,7 @@ import requests
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        RotatingFileHandler("railway.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
+    handlers=[logging.StreamHandler()],
 )
 log = logging.getLogger(__name__)
 
@@ -95,14 +91,6 @@ def is_running_as_root():
 
 # ==================== CONFIG ====================
 ACCOUNTS = [
-    {
-        "name": "account_1",
-        "email": os.getenv("GOOGLE_EMAIL_1", "phu413271@gmail.com"),
-        "password": os.getenv("GOOGLE_PASSWORD_1", "nvt2005S!"),
-        "recovery": os.getenv("RECOVERY_EMAIL_1", "mail2@hunght1890.com"),
-        "proxy": os.getenv("PROXY_1", "http://45.137.70.90:2433"),
-        "firebase_url": "https://studio.firebase.google.com/windows-idx-97840365",
-    },
     {
         "name": "account_2",
         "email": os.getenv("GOOGLE_EMAIL_2", "vanlong1999u@gmail.com"),
